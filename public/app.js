@@ -118,9 +118,22 @@ function render() {
  $('pause-note').textContent=state.paused?'You control when calling resumes. No assistant action is needed.':'Pause every schedule at once without deleting it.';
  $('pause').textContent=state.paused?'Resume calling':'Pause all calls';$('pause').disabled=!state.callingConnected;
  if(!state.callingConnected){$('pause').textContent='Calling not connected';$('pause-note').textContent='No calling credentials or live trigger have been installed. You can save schedules, but this app cannot place calls.';}
- $('schedules').replaceChildren();
- if(!state.schedules.length){const empty=el('div','card empty');empty.append(el('div','icon','◷'),el('h3','','A quieter way to plan'),el('p','muted','Start with a time and a message. Your saved alarms will appear here.'));$('schedules').append(empty);}
- for(const s of state.schedules){
+ $('schedules').replaceChildren();$('past').replaceChildren();
+ // Past one-time calls and replaced/cancelled reminders go in the collapsed drawer, not the main list.
+ const nowLocal=new Date().toLocaleString('sv-SE',{timeZone:'America/New_York'}).slice(0,16).replace(' ','T');
+ const isPast=s=>{const gone=s.reminder_status&&s.reminder_status!=='active';return gone||(s.days==='once'&&!s.enabled&&`${s.once_date}T${s.at}`<nowLocal);};
+ const past=state.schedules.filter(isPast);const current=state.schedules.filter(s=>!isPast(s));
+ $('past-drawer').hidden=!past.length;$('past-summary').textContent=`Past, replaced and cancelled (${past.length})`;
+ for(const s of past.sort((a,b)=>(b.once_date+b.at).localeCompare(a.once_date+a.at))){
+  const gone=s.reminder_status&&s.reminder_status!=='active';
+  const row=el('div','past-row');
+  const what=gone?(s.reminder_status==='replaced'?'Replaced':'Cancelled'):'Finished';
+  row.append(el('div','',''));row.firstChild.append(el('strong','',s.label),el('div','muted',`${s.days==='once'?shortDate(s.once_date):dayNames[s.days]} · ${s.at} · ${what}`+(s.replaced_by?` by ${s.replaced_by}`:'')));
+  const del=el('button','danger small','Delete');del.onclick=async()=>{if(await confirmAction('Delete this record?',s.label+' at '+s.at+' will be removed from this list. Past activity stays in your history.','Delete'))await change('delete',{id:s.id});};
+  row.append(del);$('past').append(row);
+ }
+ if(!current.length){const empty=el('div','card empty');empty.append(el('div','icon','◷'),el('h3','','A quieter way to plan'),el('p','muted','Start with a time and a message. Your saved alarms will appear here.'));$('schedules').append(empty);}
+ for(const s of current){
   const gone=s.reminder_status&&s.reminder_status!=='active';
   const card=el('article','card'+(gone?' retired':''));const top=el('div','top');
   top.append(el('h3','',s.label),el('span','badge'+(s.enabled&&!gone?' on':''),gone?(s.reminder_status==='replaced'?'Replaced':'Cancelled'):s.enabled?'On':'Off'));

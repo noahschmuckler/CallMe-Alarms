@@ -6,3 +6,5 @@
 .plan-when.danger-text{color:#925146}
 
 .card.retired{opacity:.7}
+
+.drawer summary{cursor:pointer;font-weight:650;font-size:15px}.drawer[open] summary{margin-bottom:6px}.past-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #e8ece4;padding:10px 0;font-size:14px}button.small{padding:7px 11px;font-size:13px}
