@@ -38,13 +38,13 @@ CREATE INDEX IF NOT EXISTS draft_status ON drafts(status,received_at);
 CREATE TABLE IF NOT EXISTS commands (
  command_id TEXT PRIMARY KEY, hash TEXT NOT NULL, content_hash TEXT, action TEXT NOT NULL,
  reminder_id TEXT NOT NULL, draft_id TEXT NOT NULL, received_at TEXT NOT NULL, state TEXT NOT NULL,
- detail TEXT, decided_at TEXT, schedule_revision INTEGER
+ detail TEXT, decided_at TEXT, schedule_revision INTEGER, new_reminder_id TEXT
 );
 CREATE INDEX IF NOT EXISTS command_reminder ON commands(reminder_id,state);
 CREATE INDEX IF NOT EXISTS command_received ON commands(received_at);
 CREATE TABLE IF NOT EXISTS reminders (
  reminder_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, schedule_id TEXT NOT NULL, command_id TEXT NOT NULL,
- call_at TEXT NOT NULL, planned_text_at TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL
+ call_at TEXT NOT NULL, planned_text_at TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, replaced_by TEXT
 );
 -- One row per finished call: what was pressed and what the app did next.
 CREATE TABLE IF NOT EXISTS events (

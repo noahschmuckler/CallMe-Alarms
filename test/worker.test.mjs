@@ -36,6 +36,7 @@ test('migration: old production schema upgrades; quiet-hour schedules stay allow
   DB.raw.exec("INSERT INTO schedules(id,label,at,days,message,repeats,enabled,created_at) VALUES('a','Late','23:00','0,1,2,3,4','x',1,1,'x'),('b','Day','07:00','0,1,2,3,4','x',1,1,'x')");
   DB.raw.exec("INSERT INTO runs(fire_key,schedule_id,label,started_at,result,call_id) VALUES('k','b','Day','2026-11-20T12:00:00Z','Call requested','c')");
   DB.raw.exec(readFileSync('migrations/0001_snooze_retry_proposals.sql','utf8'));
+  DB.raw.exec(readFileSync('migrations/0002_replace_command.sql','utf8'));
   assert.deepEqual(DB.raw.prepare('SELECT id,late_ok,snooze_minutes,until_ack FROM schedules ORDER BY id').all().map(r=>({...r})),[{id:'a',late_ok:1,snooze_minutes:0,until_ack:0},{id:'b',late_ok:0,snooze_minutes:0,until_ack:0}]);
   assert.equal(DB.raw.prepare('SELECT decided FROM runs').get().decided,1);
 });
@@ -245,6 +246,64 @@ test('cancel while the call is ringing reports "too late", and stops further cal
   b.status.c0={status:'no-answer'};
   for(let t=CALL+MIN;t<CALL+20*MIN;t+=MIN)await minute(env,b,t);
   assert.equal(b.calls.length,1);
+});
+
+const replace=(o={})=>({version:1,action:'replace',command_id:'chg-1',reminder_id:'rem-trash-1207',expected_revision:1,new_reminder_id:'rem-trash-1207-b',
+  label:'Trash out (later)',call_at:'2026-12-07T20:15:00-05:00',timezone:'America/New_York',message:'Trash, take two.',policy:{},...o});
+async function approveLatest(env,now=NOW){const d=all(env,"SELECT * FROM drafts WHERE status='pending'")[0];return decideDraft(env,d.id,d.hash,true,now);}
+
+test('replace swaps the reminder in one step: old never rings, new one rings at the new time',async()=>{
+  const env=setup();await approved(env);
+  const r=await post(env,replace());assert.equal(r.status,202);assert.equal(r.body.receipts[0].state,'draft_received');
+  assert.equal(all(env,'SELECT title FROM drafts WHERE status=\'pending\'')[0].title,'Change: Trash out (later)');
+  assert.equal(all(env,'SELECT count(*) n FROM schedules WHERE enabled=1')[0].n,1);          // staging changes nothing
+  assert.match((await approveLatest(env)).result,/changed/);
+  const rc=await receipt(env,'chg-1');
+  assert.deepEqual([rc.state,rc.new_reminder_id,rc.replaced_reminder_id,rc.schedule_revision,rc.call_at],['armed','rem-trash-1207-b','rem-trash-1207',1,'2026-12-07T20:15:00-05:00']);
+  const old=await receipt(env,'cmd-1');assert.equal(old.state,'replaced');assert.equal(old.replaced_by,'rem-trash-1207-b');
+  const b=backend();
+  await minute(env,b,CALL);assert.equal(b.calls.length,0);                  // 7:30 PM: old reminder is gone
+  await minute(env,b,CALL+45*MIN);assert.equal(b.calls.length,1);           // 8:15 PM: new one rings
+  assert.match(b.calls[0].message,/^Trash, take two\./);
+  b.status.c0={status:'completed',digits:'1',acknowledged:true};await minute(env,b,CALL+46*MIN);
+  assert.equal((await receipt(env,'chg-1')).events[0].outcome,'acknowledged');
+});
+
+test('replace while the old call is ringing changes nothing and says so',async()=>{
+  const env=setup();await approved(env);const b=backend();
+  await minute(env,b,CALL);assert.equal(b.calls.length,1);                  // old call in progress
+  await post(env,replace({call_at:'2026-12-07T21:00:00-05:00'}));
+  assert.match((await approveLatest(env,CALL+10000)).result,/nothing changed/);
+  const rc=await receipt(env,'chg-1');assert.equal(rc.state,'too_late');
+  assert.equal(all(env,"SELECT count(*) n FROM reminders WHERE reminder_id='rem-trash-1207-b'")[0].n,0);
+  assert.equal(all(env,"SELECT count(*) n FROM schedules WHERE reminder_id='rem-trash-1207-b'")[0].n,0);
+  assert.equal((await receipt(env,'cmd-1')).state!=='replaced',true);
+});
+
+test('replace also stops a queued snooze or repeat call of the old reminder',async()=>{
+  const env=setup();await approved(env);const b=backend();
+  await minute(env,b,CALL);b.status.c0={status:'completed',digits:'2'};await minute(env,b,CALL+MIN);
+  assert.equal(all(env,"SELECT count(*) n FROM followups WHERE status='pending'")[0].n,1);      // snooze queued for 8:01
+  await post(env,replace({call_at:'2026-12-07T21:00:00-05:00'}));
+  assert.match((await approveLatest(env,CALL+2*MIN)).result,/changed/);
+  assert.equal(all(env,"SELECT count(*) n FROM followups WHERE status='pending'")[0].n,0);
+  for(let t=CALL+2*MIN;t<CALL+40*MIN;t+=MIN)await minute(env,b,t);
+  assert.equal(b.calls.length,1);                                           // no snooze call
+});
+
+test('replace is refused for stale revisions, unknown or already-replaced reminders, and same ids',async()=>{
+  const env=setup();await approved(env);
+  await rejects(post(env,replace({new_reminder_id:'rem-trash-1207'})),400,/must differ/);
+  await rejects(post(env,replace({reminder_id:'nope'})),409,/nothing to replace/);
+  await rejects(post(env,replace({approved:true})),400,/does not accept: approved/);
+  env.DB.raw.exec('UPDATE schedules SET revision=2');
+  await rejects(post(env,replace()),409,/revision 2, not 1/);
+  env.DB.raw.exec('UPDATE schedules SET revision=1');
+  await post(env,replace());await approveLatest(env);
+  await rejects(post(env,replace({command_id:'chg-2',new_reminder_id:'rem-c'})),409,/already replaced by rem-trash-1207-b/);
+  await post(env,cancel());const c=await approveLatest(env);
+  assert.equal((await receipt(env,'cancel-1')).state,'nothing_pending');
+  await rejects(post(env,create({command_id:'cmd-x',reminder_id:'rem-trash-1207-b'})),409,/already exists/);
 });
 
 test('receipt reports what happened on the call',async()=>{

@@ -201,8 +201,8 @@ async function draftsForUI(env){
   for(const d of rows){
     d.commands=JSON.parse(d.commands);
     for(const c of d.commands){
-      if(c.action!=='cancel')continue;
-      const r=await env.DB.prepare('SELECT r.call_at,r.status,s.label,s.revision,s.enabled FROM reminders r LEFT JOIN schedules s ON s.id=r.schedule_id WHERE r.reminder_id=?').bind(c.reminder_id).first();
+      if(c.action!=='cancel'&&c.action!=='replace')continue;
+      const r=await env.DB.prepare('SELECT r.call_at,r.status,r.replaced_by,s.label,s.message,s.revision,s.enabled FROM reminders r LEFT JOIN schedules s ON s.id=r.schedule_id WHERE r.reminder_id=?').bind(c.reminder_id).first();
       c.target=r||null;
     }
   }

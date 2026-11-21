@@ -40,10 +40,10 @@ function extras(s){
  return parts.join(' · ');
 }
 function spokenText(s){
- const m=s.if_unacknowledged||mode(s);
- if(!s.snooze_minutes&&m==='none')return s.message;
- if(s.snooze_minutes)return s.message+` Press 1 if you're up. Press 2 to snooze for ${s.snooze_minutes} minutes.`;
- return s.message+(m==='keep_calling'?" Press 1 when you're getting out of bed. I'll keep calling until you do.":' Press 1 to confirm.');
+ const m=s.if_unacknowledged||mode(s),upd=' Press 3 to leave a spoken update.';
+ if(!s.snooze_minutes&&m==='none')return s.message+upd;
+ if(s.snooze_minutes)return s.message+` Press 1 if you're up. Press 2 to snooze for ${s.snooze_minutes} minutes.`+upd;
+ return s.message+(m==='keep_calling'?" Press 1 when you're getting out of bed. I'll keep calling until you do.":' Press 1 to confirm.')+upd;
 }
 function readiness(){
  if(!state.callingConnected)return 'Calling is not connected: approved calls would be saved but cannot ring.';
@@ -65,6 +65,17 @@ function renderDrafts(){
    if(c.action==='cancel'){
     const t=c.target;
     li.append(el('div','plan-when danger-text','CANCEL'),el('strong','',t?.label||c.reminder_id),el('div','muted',t?`${et(t.call_at)} ET · currently ${t.status==='cancelled'?'already cancelled':t.enabled?'armed':'already ran or turned off'} · revision ${t.revision??'?'} (expects ${c.expected_revision})`:'Unknown reminder'),el('div','muted','Reminder '+c.reminder_id));
+   } else if(c.action==='replace'){
+    const t=c.target,q=quiet(c.local.at);
+    const was=t?`${et(t.call_at)} ET · ${t.status==='replaced'?'already replaced':t.status==='cancelled'?'already cancelled':t.enabled?'armed':'already ran or turned off'} · revision ${t.revision??'?'} (expects ${c.expected_revision})`:'Unknown reminder';
+    li.append(el('div','plan-when','CHANGE'),
+     el('div','muted','Replaces: '+(t?.label||c.reminder_id)+' · '+was),
+     ...(t?.message?[el('div','muted','Old message: “'+t.message+'”')]:[]),
+     el('div','plan-when',`New: ${longDate(c.local.date)} · ${t12(c.local.at)} ${c.timezone} (UTC${c.local.offset}) · ${until(c.call_at)}`),el('strong','',c.label),
+     el('div','quote','“'+spokenText({...c,...c.policy})+'”'),el('div','muted',extras({...c.policy,message:c.message})),
+     el('div','muted',`Calls your phone ending 0221 · new reminder ${c.new_reminder_id}`+(c.planned_text_at?` · text planned ${et(c.planned_text_at)} ET`:'')),
+     el('div','muted','If a call for the old reminder is ringing when you approve, nothing changes and Instinct is told.'));
+    if(q)li.append(el('div','danger-text','Quiet hours: approving this allows a call between 10:30 PM and 5:00 AM.'));
    } else {
     const q=quiet(c.local.at);
     li.append(el('div','plan-when',`${longDate(c.local.date)} · ${t12(c.local.at)} ${c.timezone} (UTC${c.local.offset}) · ${until(c.call_at)}`),el('strong','',c.label),

@@ -8,6 +8,7 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const TIME_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):00(?:\.0+)?([+-]\d{2}:\d{2})$/;
 const CREATE_KEYS = ['version','action','command_id','reminder_id','label','planned_text_at','call_at','timezone','message','policy'];
 const CANCEL_KEYS = ['version','action','command_id','reminder_id','expected_revision'];
+const REPLACE_KEYS = [...CREATE_KEYS, 'expected_revision', 'new_reminder_id'];
 const POLICY_KEYS = ['repeats','snooze_minutes','max_snoozes','if_unacknowledged','retry_every_minutes','max_retries','allow_quiet_hours'];
 const ENVELOPE_KEYS = ['version','title','note','commands'];
 
@@ -81,8 +82,16 @@ function normalizeCommand(c, now) {
     unknownKeys(c, CANCEL_KEYS, 'cancel command');
     return { action: 'cancel', command_id: c.command_id, reminder_id: c.reminder_id, expected_revision: intIn(c.expected_revision, 1, 1e6, 'expected_revision') };
   }
-  if (c.action !== 'create') throw Error('"action" must be "create" or "cancel"');
-  unknownKeys(c, CREATE_KEYS, 'create command');
+  if (c.action !== 'create' && c.action !== 'replace') throw Error('"action" must be "create", "cancel" or "replace"');
+  const replacing = c.action === 'replace';
+  unknownKeys(c, replacing ? REPLACE_KEYS : CREATE_KEYS, c.action + ' command');
+  let expected_revision, new_reminder_id;
+  if (replacing) {
+    expected_revision = intIn(c.expected_revision, 1, 1e6, 'expected_revision');
+    if (typeof c.new_reminder_id !== 'string' || !ID_RE.test(c.new_reminder_id)) throw Error('"new_reminder_id" must be 1-100 letters, digits, or . _ : -');
+    if (c.new_reminder_id === c.reminder_id) throw Error('"new_reminder_id" must differ from "reminder_id" (the reminder being replaced)');
+    new_reminder_id = c.new_reminder_id;
+  }
   if (c.timezone !== TZ) throw Error(`"timezone" must be "${TZ}"`);
   if (typeof c.label !== 'string' || !c.label.trim() || c.label.length > 80) throw Error('"label" must be 1-80 characters');
   if (typeof c.message !== 'string' || !c.message.trim() || c.message.length > 700) throw Error('"message" must be 1-700 characters (the keypad menu is added after it)');
@@ -96,11 +105,13 @@ function normalizeCommand(c, now) {
   const policy = normalizePolicy(c.policy);
   if (!policy.allow_quiet_hours && inQuietHours(call.at))
     throw Error(`"call_at" ${call.at} is in quiet hours (after 10:30 PM or before 5:00 AM); set "policy.allow_quiet_hours": true only if Noah agreed to it`);
-  return {
-    action: 'create', command_id: c.command_id, reminder_id: c.reminder_id, label: c.label.trim(), message: c.message.trim(),
+  const out = {
+    action: c.action, command_id: c.command_id, reminder_id: c.reminder_id, label: c.label.trim(), message: c.message.trim(),
     call_at: c.call_at, planned_text_at: planned ? c.planned_text_at : null, timezone: TZ, policy,
     local: { date: call.date, at: call.at, offset: call.offset },
   };
+  if (replacing) { out.expected_revision = expected_revision; out.new_reminder_id = new_reminder_id; }
+  return out;
 }
 
 // The reminder's content (everything except which command delivered it).
@@ -129,12 +140,17 @@ export function parseSubmission(text, now) {
     try {
       const n = normalizeCommand(c, now);
       if (seenC.has(n.command_id)) throw Error(`repeats command_id "${n.command_id}"`);
-      if (seenR.has(n.reminder_id)) throw Error(`repeats reminder_id "${n.reminder_id}" in the same proposal`);
-      seenC.add(n.command_id); seenR.add(n.reminder_id); commands.push(n);
+      for (const r of [n.reminder_id, n.new_reminder_id].filter(Boolean)) {
+        if (seenR.has(r)) throw Error(`repeats reminder_id "${r}" in the same proposal`);
+        seenR.add(r);
+      }
+      seenC.add(n.command_id); commands.push(n);
     } catch (e) { problems.push(`${where}: ${String(e.message).replace(/\.$/, '')}.`); }
   });
   if (problems.length) throw new IntakeError(400, 'invalid_proposal', problems);
-  if (!title) title = commands.length === 1 ? (commands[0].label || 'Cancel ' + commands[0].reminder_id) : `${commands.length} proposed changes`;
+  if (!title) title = commands.length === 1
+    ? (commands[0].action === 'cancel' ? 'Cancel ' + commands[0].reminder_id : commands[0].action === 'replace' ? 'Change: ' + commands[0].label : commands[0].label)
+    : `${commands.length} proposed changes`;
   return { title, note, commands };
 }
 
@@ -145,22 +161,27 @@ export async function submit(env, text, via, now = Date.now()) {
   const receipts = [], fresh = [], conflicts = [];
   for (const c of commands) {
     c.hash = await sha256(canonical({ ...c, local: undefined }));
-    if (c.action === 'create') c.content_hash = await sha256(reminderContent(c));
+    if (c.action !== 'cancel') c.content_hash = await sha256(reminderContent(c));
     const prior = await env.DB.prepare('SELECT * FROM commands WHERE command_id=?').bind(c.command_id).first();
     if (prior) {
       if (prior.hash !== c.hash) conflicts.push(`command_id "${c.command_id}" was already used for different content. Use a new command_id.`);
       else receipts.push({ ...(await receipt(env, c.command_id)), duplicate: true });
       continue;
     }
-    if (c.action === 'create') {
-      const rem = await env.DB.prepare('SELECT content_hash FROM reminders WHERE reminder_id=?').bind(c.reminder_id).first();
-      const staged = await env.DB.prepare("SELECT content_hash FROM commands WHERE reminder_id=? AND action='create' AND state='draft_received'").bind(c.reminder_id).first();
+    // The reminder this command would create: its own id for a create, new_reminder_id for a replace.
+    const newId = c.action === 'create' ? c.reminder_id : c.action === 'replace' ? c.new_reminder_id : null;
+    if (newId) {
+      const rem = await env.DB.prepare('SELECT content_hash FROM reminders WHERE reminder_id=?').bind(newId).first();
+      const staged = await env.DB.prepare("SELECT content_hash FROM commands WHERE state='draft_received' AND ((action='create' AND reminder_id=?) OR (action='replace' AND new_reminder_id=?))").bind(newId, newId).first();
       const other = rem || staged;
-      if (other && other.content_hash !== c.content_hash) { conflicts.push(`reminder_id "${c.reminder_id}" already exists with different content. Cancel it and use a new reminder_id.`); continue; }
-      if (other) { conflicts.push(`reminder_id "${c.reminder_id}" was already proposed with this content under another command_id; check that command's receipt instead.`); continue; }
-    } else {
+      if (other && other.content_hash !== c.content_hash) { conflicts.push(`reminder_id "${newId}" already exists with different content. Use a new reminder_id.`); continue; }
+      if (other) { conflicts.push(`reminder_id "${newId}" was already proposed with this content under another command_id; check that command's receipt instead.`); continue; }
+    }
+    if (c.action !== 'create') {
+      const verb = c.action === 'cancel' ? 'cancel' : 'replace';
       const rem = await env.DB.prepare('SELECT r.*, s.revision AS revision FROM reminders r LEFT JOIN schedules s ON s.id=r.schedule_id WHERE r.reminder_id=?').bind(c.reminder_id).first();
-      if (!rem) { conflicts.push(`reminder_id "${c.reminder_id}" is not an approved reminder; nothing to cancel.`); continue; }
+      if (!rem) { conflicts.push(`reminder_id "${c.reminder_id}" is not an approved reminder; nothing to ${verb}.`); continue; }
+      if (c.action === 'replace' && rem.status !== 'active') { conflicts.push(`reminder_id "${c.reminder_id}" was already ${rem.status}${rem.replaced_by ? ' by ' + rem.replaced_by : ''}; nothing to replace.`); continue; }
       if (rem.revision !== null && rem.revision !== c.expected_revision) { conflicts.push(`reminder_id "${c.reminder_id}" is at revision ${rem.revision}, not ${c.expected_revision}. Check the current receipt; nothing was changed.`); continue; }
     }
     fresh.push(c);
@@ -175,8 +196,8 @@ export async function submit(env, text, via, now = Date.now()) {
   const stored = JSON.stringify(fresh);
   const hash = await sha256(stored);
   const stmts = [env.DB.prepare('INSERT INTO drafts(id,received_at,via,title,note,commands,hash) VALUES(?,?,?,?,?,?,?)').bind(id, iso(now), via, title, note, stored, hash)];
-  for (const c of fresh) stmts.push(env.DB.prepare("INSERT INTO commands(command_id,hash,content_hash,action,reminder_id,draft_id,received_at,state) VALUES(?,?,?,?,?,?,?,'draft_received')")
-    .bind(c.command_id, c.hash, c.content_hash || null, c.action, c.reminder_id, id, iso(now)));
+  for (const c of fresh) stmts.push(env.DB.prepare("INSERT INTO commands(command_id,hash,content_hash,action,reminder_id,new_reminder_id,draft_id,received_at,state) VALUES(?,?,?,?,?,?,?,?,'draft_received')")
+    .bind(c.command_id, c.hash, c.content_hash || null, c.action, c.reminder_id, c.new_reminder_id || null, id, iso(now)));
   await env.DB.batch(stmts);
   for (const c of fresh) receipts.push(await receipt(env, c.command_id));
   return { status: 202, body: { ok: true, draft_id: id, draft_revision: 1, receipts, note: 'Staged as a draft. Nothing is scheduled until Noah approves it in CallMe.' } };
@@ -202,7 +223,8 @@ export async function decideDraft(env, id, hash, approve, now = Date.now()) {
   const claim = await env.DB.prepare("UPDATE drafts SET status='approving' WHERE id=? AND status='pending' AND hash=?").bind(id, hash).run();
   if (!claim.meta.changes) return { error: 'This draft is no longer waiting for review.' };
   const results = [];
-  for (const c of commands) results.push(c.action === 'create' ? await approveCreate(env, d, c, now) : await approveCancel(env, c, now));
+  for (const c of commands) results.push(c.action === 'create' ? await approveCreate(env, d, c, now)
+    : c.action === 'replace' ? await approveReplace(env, d, c, now) : await approveCancel(env, c, now));
   const summary = results.map(r => `${r.label}: ${r.text}`).join('; ');
   await env.DB.prepare("UPDATE drafts SET status='approved',decided_at=?,result=? WHERE id=?").bind(iso(now), summary.slice(0, 2000), id).run();
   return { ok: true, result: summary };
@@ -233,6 +255,7 @@ async function approveCancel(env, c, now) {
   const rem = await env.DB.prepare('SELECT * FROM reminders WHERE reminder_id=?').bind(c.reminder_id).first();
   if (!rem) return done('conflict', 'Unknown reminder; nothing changed.');
   if (rem.status === 'cancelled') return done('cancelled', 'Already cancelled.');
+  if (rem.status === 'replaced') return done('nothing_pending', `Already replaced by ${rem.replaced_by}; cancel that reminder instead. Nothing changed.`);
   const s = await env.DB.prepare('SELECT * FROM schedules WHERE id=?').bind(rem.schedule_id).first();
   if (s && s.revision !== c.expected_revision) return done('conflict', `Reminder is at revision ${s.revision}, not ${c.expected_revision}; nothing changed.`);
   if (!s) return done('nothing_pending', 'The schedule was already deleted in CallMe. Nothing changed.');
@@ -253,24 +276,66 @@ async function approveCancel(env, c, now) {
   return done('cancelled', before.n ? 'Cancelled. Further snooze or repeat calls stopped.' : 'Cancelled before it called.');
 }
 
+// Replace = cancel the old reminder and create the new one in a single database transaction,
+// and only if no call for the old reminder is in progress. Otherwise nothing changes.
+async function approveReplace(env, d, c, now) {
+  const label = 'Change ' + c.label;
+  const done = async (state, detail) => { await env.DB.prepare('UPDATE commands SET state=?,detail=?,decided_at=? WHERE command_id=?').bind(state, detail, iso(now), c.command_id).run(); return { label, text: detail }; };
+  if (Date.parse(c.call_at) <= now + 60000) return done('expired', 'New call time passed before approval; nothing changed.');
+  const rem = await env.DB.prepare('SELECT * FROM reminders WHERE reminder_id=?').bind(c.reminder_id).first();
+  if (!rem) return done('conflict', 'Unknown reminder; nothing changed.');
+  if (rem.status !== 'active') return done('conflict', `Reminder was already ${rem.status}${rem.replaced_by ? ' by ' + rem.replaced_by : ''}; nothing changed.`);
+  if (await env.DB.prepare('SELECT 1 FROM reminders WHERE reminder_id=?').bind(c.new_reminder_id).first()) return done('conflict', 'new_reminder_id already exists; nothing changed.');
+  const s = await env.DB.prepare('SELECT * FROM schedules WHERE id=?').bind(rem.schedule_id).first();
+  if (!s) return done('nothing_pending', 'The old schedule was deleted in CallMe. Nothing changed; send a create instead.');
+  if (s.revision !== c.expected_revision) return done('conflict', `Reminder is at revision ${s.revision}, not ${c.expected_revision}; nothing changed.`);
+  const inFlight = sql => env.DB.prepare(sql).bind(rem.schedule_id).first();
+  const pending = (await inFlight("SELECT count(*) AS n FROM followups WHERE schedule_id=? AND status='pending'")).n;
+  if (!s.enabled && !pending && !(await inFlight('SELECT count(*) AS n FROM runs WHERE schedule_id=? AND decided=0')).n)
+    return done('nothing_pending', 'The old reminder already finished or was turned off. Nothing changed; send a create instead.');
+  const count = await env.DB.prepare('SELECT count(*) AS n FROM schedules').first();
+  if (count.n >= 100) return done('rejected', 'Schedule limit (100) reached; nothing changed.');
+  // Every statement carries the same guard, so a call that starts in between makes the whole change a no-op.
+  const idle = 'NOT EXISTS (SELECT 1 FROM runs WHERE schedule_id=? AND decided=0)';
+  const sid = crypto.randomUUID(), p = c.policy, old = rem.schedule_id;
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO schedules(id,label,at,days,once_date,message,repeats,enabled,created_at,snooze_minutes,max_snoozes,retry_minutes,max_retries,until_ack,late_ok,revision,reminder_id,source)
+      SELECT ?,?,?,'once',?,?,?,1,?,?,?,?,?,?,?,1,?,? WHERE ${idle}`).bind(sid, c.label, c.local.at, c.local.date, c.message, p.repeats, iso(now), p.snooze_minutes, p.max_snoozes,
+      p.retry_every_minutes, p.max_retries, p.if_unacknowledged === 'keep_calling' ? 1 : 0, p.allow_quiet_hours ? 1 : 0, c.new_reminder_id, 'proposal:' + d.id, old),
+    env.DB.prepare(`INSERT INTO reminders(reminder_id,content_hash,schedule_id,command_id,call_at,planned_text_at,status,created_at) SELECT ?,?,?,?,?,?,'active',? WHERE ${idle}`)
+      .bind(c.new_reminder_id, c.content_hash, sid, c.command_id, c.call_at, c.planned_text_at, iso(now), old),
+    env.DB.prepare(`UPDATE schedules SET enabled=0 WHERE id=? AND ${idle}`).bind(old, old),
+    env.DB.prepare(`UPDATE followups SET status='cancelled' WHERE schedule_id=? AND status='pending' AND ${idle}`).bind(old, old),
+    env.DB.prepare(`UPDATE reminders SET status='replaced',replaced_by=? WHERE reminder_id=? AND ${idle}`).bind(c.new_reminder_id, c.reminder_id, old),
+    env.DB.prepare(`UPDATE commands SET state='approved',detail=?,decided_at=?,schedule_revision=1 WHERE command_id=? AND ${idle}`)
+      .bind(`Approved by Noah: replaced ${c.reminder_id}`, iso(now), c.command_id, old),
+  ]);
+  if (!await env.DB.prepare('SELECT 1 FROM reminders WHERE reminder_id=?').bind(c.new_reminder_id).first())
+    return done('too_late', 'A call for the old reminder is in progress or just ended; nothing changed. Send the change again in a few minutes.');
+  return { label, text: 'changed' };
+}
+
 // The current, authoritative state of one command, for the assistant and for the app.
 export async function receipt(env, commandId) {
   const c = await env.DB.prepare('SELECT * FROM commands WHERE command_id=?').bind(commandId).first();
   if (!c) return null;
   const out = { command_id: c.command_id, reminder_id: c.reminder_id, action: c.action, draft_id: c.draft_id, draft_revision: 1,
     state: c.state, detail: c.detail || null, received_at: c.received_at, decided_at: c.decided_at || null, server_time: iso(Date.now()) };
-  if (c.action === 'create' && c.state === 'approved') {
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE reminder_id=?').bind(c.reminder_id).first();
+  if (c.action === 'replace') { out.new_reminder_id = c.new_reminder_id; out.replaced_reminder_id = c.reminder_id; }
+  if (c.action !== 'cancel' && c.state === 'approved') {
+    const rid = c.action === 'replace' ? c.new_reminder_id : c.reminder_id;
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE reminder_id=?').bind(rid).first();
     const s = r && await env.DB.prepare('SELECT * FROM schedules WHERE id=?').bind(r.schedule_id).first();
     const settings = await env.DB.prepare('SELECT paused FROM settings WHERE id=1').first();
     out.call_at = r?.call_at; out.timezone = TZ; out.schedule_revision = s?.revision ?? null;
     const runs = s ? (await env.DB.prepare('SELECT count(*) AS n FROM runs WHERE schedule_id=?').bind(s.id).first()).n : 0;
     if (r?.status === 'cancelled') out.state = 'cancelled';
-    else if (!s) out.state = r && (await env.DB.prepare('SELECT 1 FROM events WHERE reminder_id=?').bind(c.reminder_id).first()) ? 'called' : 'deleted_by_owner';
+    else if (r?.status === 'replaced') { out.state = 'replaced'; out.replaced_by = r.replaced_by; out.detail = 'Replaced by ' + r.replaced_by; }
+    else if (!s) out.state = r && (await env.DB.prepare('SELECT 1 FROM events WHERE reminder_id=?').bind(rid).first()) ? 'called' : 'deleted_by_owner';
     else if (s.enabled) out.state = (!settings || settings.paused || !env.CALLME_SECRET) ? 'saved_inactive' : 'armed';
     else out.state = runs ? 'called' : 'turned_off_by_owner';
     if (out.state === 'saved_inactive') out.detail = !env.CALLME_SECRET ? 'Approved, but calling is not connected.' : 'Approved, but master pause is on; it will not ring until Noah resumes calling.';
-    out.events = (await env.DB.prepare('SELECT at,kind,call_status,digits,outcome FROM events WHERE reminder_id=? ORDER BY id').bind(c.reminder_id).all()).results;
+    out.events = (await env.DB.prepare('SELECT at,kind,call_status,digits,outcome FROM events WHERE reminder_id=? ORDER BY id').bind(rid).all()).results;
   }
   return out;
 }

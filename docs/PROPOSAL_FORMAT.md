@@ -66,6 +66,21 @@ One command, or an envelope holding several (reviewed and approved together as o
 { "version": 1, "action": "cancel", "command_id": "cmd-2026-12-07-trash-cancel", "reminder_id": "rem-2026-12-07-trash", "expected_revision": 1 }
 ```
 
+### replace (change an approved reminder)
+
+```json
+{ "version": 1, "action": "replace", "command_id": "cmd-2026-12-07-trash-change", "reminder_id": "rem-2026-12-07-trash",
+  "expected_revision": 1, "new_reminder_id": "rem-2026-12-07-trash-b",
+  "label": "Trash out", "call_at": "2026-12-07T20:15:00-05:00", "timezone": "America/New_York",
+  "message": "You planned to take out the trash. Is that done?", "policy": { "snooze_minutes": 30 } }
+```
+
+All create fields describe the new reminder (same rules), plus `expected_revision` (current revision of the
+reminder being replaced) and `new_reminder_id` (must differ from `reminder_id` and be unused). Noah sees one
+"CHANGE" with the old and new versions side by side. On approval, in one database step, the old reminder and
+any snooze or repeat call it has queued are cancelled and the new reminder is armed. If a call for the old
+reminder is in progress (or just ended and is still being recorded), nothing changes: state `too_late`.
+
 ### Field rules
 
 | Field | Rules |
@@ -132,7 +147,9 @@ Command receipt `state`:
 | `turned_off_by_owner`, `deleted_by_owner` | Noah turned it off or deleted it in the app. |
 | `cancelled` | Cancelled (for a create: the reminder; for a cancel: the cancel succeeded). |
 | `cancel_too_late` | A call was already sent or ringing when the cancel was approved. It may have rung. No further calls are placed. |
-| `nothing_pending` | Cancel approved, but the reminder had already finished or been turned off. Nothing changed. |
+| `nothing_pending` | Cancel or replace approved, but the reminder had already finished or been turned off (or was already replaced). Nothing changed. |
+| `too_late` | Replace approved while a call for the old reminder was in progress. Nothing changed; send the change again in a few minutes. |
+| `replaced` | (Receipt of the old reminder's create.) It was replaced; `replaced_by` names the new reminder. |
 | `conflict` | Cancel approved, but the revision no longer matched or the reminder vanished. Nothing changed. |
 
 Receipt example (create, after the call):
