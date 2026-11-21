@@ -121,14 +121,18 @@ function render() {
  $('schedules').replaceChildren();
  if(!state.schedules.length){const empty=el('div','card empty');empty.append(el('div','icon','◷'),el('h3','','A quieter way to plan'),el('p','muted','Start with a time and a message. Your saved alarms will appear here.'));$('schedules').append(empty);}
  for(const s of state.schedules){
-  const card=el('article','card');const top=el('div','top');top.append(el('h3','',s.label),el('span','badge'+(s.enabled?' on':''),s.enabled?'On':'Off'));
-  card.append(top,el('div','time',s.at),el('div','muted',(s.days==='once'?shortDate(s.once_date)+' · One time':dayNames[s.days])+' · Eastern Time'+(s.reminder_id?` · reminder ${s.reminder_id} rev ${s.revision}`:'')),el('div','quote',spokenText(s)),el('p','muted',extras(s)));
+  const gone=s.reminder_status&&s.reminder_status!=='active';
+  const card=el('article','card'+(gone?' retired':''));const top=el('div','top');
+  top.append(el('h3','',s.label),el('span','badge'+(s.enabled&&!gone?' on':''),gone?(s.reminder_status==='replaced'?'Replaced':'Cancelled'):s.enabled?'On':'Off'));
+  card.append(top);
+  if(gone)card.append(el('p','danger-text',s.reminder_status==='replaced'?`Replaced by reminder ${s.replaced_by}. This one will not ring.`:'Cancelled by an approved proposal. This one will not ring.'));
+  card.append(el('div','time',s.at),el('div','muted',(s.days==='once'?shortDate(s.once_date)+' · One time':dayNames[s.days])+' · Eastern Time'+(s.reminder_id?` · reminder ${s.reminder_id} rev ${s.revision}`:'')),el('div','quote',spokenText(s)),el('p','muted',extras(s)));
   const actions=el('div','actions');
   const edit=el('button','secondary','Edit');edit.onclick=()=>{for(const key of ['id','label','at','days','message','repeats','snooze_minutes'])$(key).value=s[key];$('if_unacknowledged').value=mode(s);$('retry_minutes').value=s.retry_minutes||3;$('max_retries').value=s.max_retries||2;$('late_ok').checked=!!s.late_ok;$('once').value=s.once_date;$('enabled').checked=!!s.enabled;$('form-title').textContent='Edit schedule';$('cancel').hidden=false;dates();$('editor').scrollIntoView({behavior:'smooth',block:'start'});};
   const toggle=el('button','secondary',s.enabled?'Turn off':'Turn on');toggle.onclick=async()=>{if(s.enabled||await confirmAction('Turn on this schedule?',state.paused?'Master pause is still on. This schedule can call after you resume calling.':'This schedule can place a call at its next selected time. Existing call-service charges apply.','Turn on'))await change('toggle',{id:s.id});};
   const del=el('button','danger','Delete');del.onclick=async()=>{if(await confirmAction('Delete this schedule?',s.label+' at '+s.at+' will be removed. Past activity stays in your history.','Delete schedule'))await change('delete',{id:s.id});};
   const test=el('button','secondary','Test call now');test.disabled=!state.callingConnected;test.onclick=async()=>{if(await confirmAction('Call your phone now?','Places one real call with this message right away, even while calling is paused. Existing call-service charges apply.','Call now'))await change('test',{id:s.id});};
-  actions.append(edit,toggle,test,del);card.append(actions);$('schedules').append(card);
+  if(gone)actions.append(del);else actions.append(edit,toggle,test,del);card.append(actions);$('schedules').append(card);
  }
  $('activity').replaceChildren();
  if(!state.runs.length)$('activity').append(el('p','muted','No scheduled calls have run yet.'));

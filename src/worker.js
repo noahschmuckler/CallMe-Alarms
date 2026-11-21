@@ -197,6 +197,9 @@ async function inbox(req,env,url){
     return response({error:'server_error',problems:['Status unknown. Resending the same command_id is safe.']},500);
   }
 }
+async function retired(env,scheduleId){
+  return !!await env.DB.prepare("SELECT 1 FROM reminders WHERE schedule_id=? AND status!='active'").bind(scheduleId).first();
+}
 async function draftsForUI(env){
   await expireDrafts(env);
   const rows=(await env.DB.prepare("SELECT * FROM drafts WHERE status IN ('pending','approving') OR decided_at>=? ORDER BY received_at DESC LIMIT 15").bind(iso(Date.now()-3*86400000)).all()).results;
@@ -240,7 +243,8 @@ export default {
   try {
    if(req.method==='GET'&&url.pathname==='/api/state') {
     const settings=await env.DB.prepare('SELECT paused FROM settings WHERE id=1').first();
-    const schedules=await env.DB.prepare('SELECT * FROM schedules ORDER BY at,label').all();
+    // reminder_status shows when an approved reminder was later replaced or cancelled by a proposal.
+    const schedules=await env.DB.prepare("SELECT s.*,r.status AS reminder_status,r.replaced_by FROM schedules s LEFT JOIN reminders r ON r.reminder_id=s.reminder_id AND r.schedule_id=s.id ORDER BY (COALESCE(r.status,'active')!='active'),s.at,s.label").all();
     const runs=await env.DB.prepare('SELECT label,started_at,result FROM runs ORDER BY started_at DESC LIMIT 20').all();
     const followups=await env.DB.prepare("SELECT f.id,f.kind,f.due_at,f.snoozes,f.retries,s.label FROM followups f JOIN schedules s ON s.id=f.schedule_id WHERE f.status='pending' ORDER BY f.due_at").all();
     return response({callingConnected:!!env.CALLME_SECRET,proposalInbox:!!env.PLAN_TOKEN,emailCheck:!!(env.HELPER_URL&&env.HELPER_KEY),paused:!settings||!!settings.paused,quiet:{start:QUIET_START,end:QUIET_END},
@@ -258,6 +262,7 @@ export default {
     await env.DB.prepare('UPDATE settings SET paused=? WHERE id=1').bind(s.paused?1:0).run();return response({ok:true});
    }
    if(url.pathname==='/api/save') {
+    if(s.id&&await retired(env,s.id))return response({error:'This reminder was replaced or cancelled, so it cannot be edited. You can delete it.'},409);
     validate(s);const id=s.id||crypto.randomUUID();
     const f=[s.snooze_minutes,s.max_snoozes,s.retry_minutes,s.max_retries,s.until_ack,s.late_ok];
     const cols='label=?,at=?,days=?,once_date=?,message=?,repeats=?,enabled=?,snooze_minutes=?,max_snoozes=?,retry_minutes=?,max_retries=?,until_ack=?,late_ok=?';
@@ -289,6 +294,8 @@ export default {
     return callId?response({ok:true}):response({error:result},502);
    }
    if(url.pathname==='/api/toggle') {
+    // A reminder that a proposal replaced or cancelled can never be turned back on.
+    if(await retired(env,s.id))return response({error:'This reminder was replaced or cancelled, so it cannot be turned on again. You can delete it.'},409);
     await env.DB.prepare('UPDATE schedules SET enabled=1-enabled WHERE id=?').bind(s.id).run();
     const row=await env.DB.prepare('SELECT enabled FROM schedules WHERE id=?').bind(s.id).first();
     if(row&&!row.enabled)await cancelFollowups(env,s.id);

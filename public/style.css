@@ -4,3 +4,5 @@
 [hidden]{display:none!important}.danger-text{color:#925146}dialog{border:1px solid #dfe4da;border-radius:16px;max-width:440px;padding:26px}dialog::backdrop{background:#183f3566}.check{margin-top:18px}
 .plan.pending{border-color:#c9b37a;box-shadow:0 3px 18px #c9b37a33}.plan-calls{padding-left:20px;margin:14px 0 0}.plan-calls li{padding:10px 0;border-top:1px solid #e8ece4}.plan-when{font-size:13px;font-weight:650;color:#245e4b;margin-bottom:2px}select:disabled{opacity:.5}
 .plan-when.danger-text{color:#925146}
+
+.card.retired{opacity:.7}

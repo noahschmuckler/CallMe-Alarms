@@ -376,3 +376,19 @@ test('Brain dump button places an immediate call where press 1 records a brain d
     await followUp(env,Date.now(),async()=>{throw Error('must not poll');});   // never starts snooze/repeat logic
   }finally{globalThis.fetch=orig;}
 });
+
+test('a replaced reminder is shown as Replaced and cannot be turned on or edited again',async()=>{
+  const env=setup();await approved(env);await post(env,replace());await approveLatest(env);
+  const auth={'Authorization':'Basic '+btoa('u:pw'),'X-Alarm-UI':'1','Content-Type':'application/json','Origin':'https://x'};
+  const st=await (await worker.fetch(new Request('https://x/api/state',{headers:auth}),env)).json();
+  const [live,old]=st.schedules;                                     // retired ones listed last
+  assert.deepEqual([live.reminder_status,live.enabled],['active',1]);
+  assert.deepEqual([old.reminder_status,old.replaced_by,old.enabled],['replaced','rem-trash-1207-b',0]);
+  const on=await worker.fetch(new Request('https://x/api/toggle',{method:'POST',headers:auth,body:JSON.stringify({id:old.id})}),env);
+  assert.equal(on.status,409);
+  assert.equal(all(env,'SELECT enabled FROM schedules WHERE id=?',old.id)[0].enabled,0);
+  const ed=await worker.fetch(new Request('https://x/api/save',{method:'POST',headers:auth,body:JSON.stringify({...old,enabled:true})}),env);
+  assert.equal(ed.status,409);
+  const off=await worker.fetch(new Request('https://x/api/toggle',{method:'POST',headers:auth,body:JSON.stringify({id:live.id})}),env);
+  assert.equal(off.status,200);                                     // the live one still works normally
+});
