@@ -101,6 +101,7 @@ function reset() {$('editor').reset();$('id').value='';$('form-title').textConte
 function dates() {policyFields();$('date-row').hidden=$('days').value!=='once';$('once').required=$('days').value==='once';}
 function render() {
  renderDrafts();renderFollowups();
+ $('email-check').hidden=!state.emailCheck;$('email-check-note').hidden=!state.emailCheck;
  $('status').textContent=!state.callingConnected?'Calling is not connected. This interface saves schedules only. Owner setup is required before calls can work.':state.paused?'All calling is paused. Schedules can be saved, but none will call until you resume calling here.':'Calling is enabled. Only schedules marked On can place calls.';
  $('global-badge').textContent=state.paused?'Paused':'Enabled';
  $('pause-note').textContent=state.paused?'You control when calling resumes. No assistant action is needed.':'Pause every schedule at once without deleting it.';
@@ -124,6 +125,13 @@ function render() {
 }
 $('days').onchange=dates;
 $('snooze_minutes').onchange=policyFields;$('if_unacknowledged').onchange=policyFields;
+$('email-check').onclick=async()=>{if(busy)return;busy=true;error('');const b=$('email-check');b.disabled=true;b.textContent='Checking…';
+ try{const r=await api('proposals/check',{});await refresh();
+  const parts=[];if(r.staged)parts.push(`${r.staged} new proposal${r.staged>1?'s':''} staged as draft${r.staged>1?'s':''}; review at the top`);
+  if(r.problems)parts.push(`${r.problems} had problems (Instinct was told what to fix)`);if(r.already)parts.push(`${r.already} already received`);
+  if(r.rejected)parts.push(`${r.rejected} ignored: sender could not be verified`);
+  $('status').textContent=r.busy?'A check was already running. Try again in a few seconds.':parts.length?parts.join('. ')+'.':'No new proposal emails.';}
+ catch(e){error(e.message);}finally{busy=false;b.disabled=false;b.textContent='Check email now';}};
 $('paste-go').onclick=async()=>{const text=$('paste').value.trim();if(!text)return;if(busy)return;busy=true;error('');
  try{const r=await api('draft/paste',{text});$('paste').value='';await refresh();$('status').textContent=r.draft_id?'Proposal staged as a draft. Review it at the top before approving.':'Already received earlier; nothing new was staged.';}catch(e){error(e.message);}finally{busy=false;}};
 $('cancel').onclick=reset;

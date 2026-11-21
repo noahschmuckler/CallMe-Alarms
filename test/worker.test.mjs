@@ -283,3 +283,19 @@ test('owner form: quiet-hour times need the explicit checkbox',async()=>{
   const r=await save({});assert.equal(r.status,400);assert.match((await r.json()).error,/quiet hours/);
   assert.equal((await save({late_ok:true})).status,200);
 });
+
+test('Check email now asks the helper script and reports what it staged',async()=>{
+  const env={...setup(),HELPER_URL:'https://script.test/exec',HELPER_KEY:'hk'};
+  let sent;const orig=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{sent={url,body:JSON.parse(init.body)};return {json:async()=>({ok:true,staged:1,already:0,problems:0,rejected:0})};};
+  const auth={'Authorization':'Basic '+btoa('u:pw'),'X-Alarm-UI':'1','Content-Type':'application/json','Origin':'https://x'};
+  try{
+    const r=await worker.fetch(new Request('https://x/api/proposals/check',{method:'POST',headers:auth,body:'{}'}),env);
+    assert.equal(r.status,200);const j=await r.json();assert.equal(j.staged,1);
+    assert.deepEqual(sent.body,{key:'hk',action:'check'});assert.equal(sent.url,'https://script.test/exec');
+    const st=await (await worker.fetch(new Request('https://x/api/state',{headers:auth}),env)).json();
+    assert.equal(st.emailCheck,true);
+    const off=await worker.fetch(new Request('https://x/api/proposals/check',{method:'POST',headers:auth,body:'{}'}),setup());
+    assert.equal(off.status,409);
+  }finally{globalThis.fetch=orig;}
+});

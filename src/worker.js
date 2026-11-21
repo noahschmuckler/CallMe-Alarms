@@ -241,7 +241,7 @@ export default {
     const schedules=await env.DB.prepare('SELECT * FROM schedules ORDER BY at,label').all();
     const runs=await env.DB.prepare('SELECT label,started_at,result FROM runs ORDER BY started_at DESC LIMIT 20').all();
     const followups=await env.DB.prepare("SELECT f.id,f.kind,f.due_at,f.snoozes,f.retries,s.label FROM followups f JOIN schedules s ON s.id=f.schedule_id WHERE f.status='pending' ORDER BY f.due_at").all();
-    return response({callingConnected:!!env.CALLME_SECRET,proposalInbox:!!env.PLAN_TOKEN,paused:!settings||!!settings.paused,quiet:{start:QUIET_START,end:QUIET_END},
+    return response({callingConnected:!!env.CALLME_SECRET,proposalInbox:!!env.PLAN_TOKEN,emailCheck:!!(env.HELPER_URL&&env.HELPER_KEY),paused:!settings||!!settings.paused,quiet:{start:QUIET_START,end:QUIET_END},
       schedules:schedules.results,runs:runs.results,drafts:await draftsForUI(env),followups:followups.results,serverTime:iso(Date.now())});
    }
    if(req.method!=='POST')return response({error:'Not found'},404);
@@ -298,6 +298,17 @@ export default {
    }
    if(url.pathname==='/api/followup/cancel') {
     await env.DB.prepare("UPDATE followups SET status='cancelled' WHERE id=? AND status='pending'").bind(s.id).run();return response({ok:true});
+   }
+   if(url.pathname==='/api/proposals/check') {
+    // Ask Noah's Apps Script to look for Instinct's proposal emails right now (it also runs every minute).
+    if(!env.HELPER_URL||!env.HELPER_KEY)return response({error:'Email check is not set up.'},409);
+    let j;
+    try{
+      const r=await fetch(env.HELPER_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:env.HELPER_KEY,action:'check'}),redirect:'follow',signal:AbortSignal.timeout(25000)});
+      j=await r.json();
+    }catch{return response({error:'Could not reach the email check. Try again in a minute.'},502);}
+    if(!j||!j.ok)return response({error:'Email check failed: '+String((j&&j.error)||'unknown').slice(0,150)},502);
+    return response({ok:true,staged:j.staged|0,already:j.already|0,problems:j.problems|0,rejected:j.rejected|0,busy:!!j.busy});
    }
    if(url.pathname==='/api/draft/paste') {
     try { const r=await submit(env,String(s.text||''),'paste'); return response({ok:true,...r.body}); }
