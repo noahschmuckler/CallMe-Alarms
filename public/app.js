@@ -52,8 +52,17 @@ function readiness(){
 }
 const STATUS={pending:'Waiting for your OK',approving:'Approving…',approved:'Approved',rejected:'Rejected',expired:'Expired'};
 function renderDrafts(){
- $('drafts').replaceChildren();
- for(const d of state.drafts){
+ $('drafts').replaceChildren();$('decided').replaceChildren();
+ // Only drafts waiting for a decision stay at the top; decided ones go in a collapsed drawer.
+ const decided=state.drafts.filter(d=>d.status!=='pending'&&d.status!=='approving');
+ $('decided-drawer').hidden=!decided.length;$('decided-summary').textContent=`Decided proposals (${decided.length})`;
+ for(const d of decided){
+  const row=el('div','past-row');const info=el('div');
+  info.append(el('strong','',d.title),el('div','muted',`${STATUS[d.status]||d.status}${d.decided_at?' '+et(d.decided_at)+' ET':''} · ${d.via==='paste'?'pasted by you':'sent by Instinct'}`));
+  if(d.result)info.append(el('div','muted',d.result));
+  row.append(info);$('decided').append(row);
+ }
+ for(const d of state.drafts.filter(d=>d.status==='pending'||d.status==='approving')){
   const card=el('article','card plan'+(d.status==='pending'?' pending':''));
   const top=el('div','top');top.append(el('h2','',d.title),el('span','badge'+(d.status==='approved'?' on':''),STATUS[d.status]||d.status));
   card.append(top,el('div','muted',`Draft ${d.id} · ${d.via==='paste'?'pasted by you':'sent by Instinct'} · received ${et(d.received_at)} ET`));
