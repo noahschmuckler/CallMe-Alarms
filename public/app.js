@@ -1,5 +1,5 @@
 const $=id=>document.getElementById(id);
-let state={paused:true,schedules:[],runs:[],plans:[],followups:[]};
+let state={paused:true,schedules:[],runs:[],drafts:[],followups:[],quiet:{start:'22:30',end:'05:00'}};
 let busy=false;
 const dayNames={'0,1,2,3,4':'Weekdays','0,1,2,3,4,5,6':'Every day','5,6':'Weekends'};
 function el(tag, cls, text) { const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e; }
@@ -22,53 +22,85 @@ function confirmAction(title,note,yes='Confirm') {
   $('confirm').oncancel=()=>resolve(false);$('confirm').showModal();
  });
 }
-const FIELDS=['id','label','at','days','message','repeats','snooze_minutes','max_snoozes','retry_minutes','max_retries'];
-const NUMS=['repeats','snooze_minutes','max_snoozes','retry_minutes','max_retries'];
+const FIELDS=['id','label','at','days','message','repeats','snooze_minutes','if_unacknowledged','retry_minutes','max_retries'];
+const NUMS=['repeats','snooze_minutes','retry_minutes','max_retries'];
 const t12=at=>{const [h,m]=at.split(':').map(Number);return `${h%12||12}:${String(m).padStart(2,'0')} ${h<12?'AM':'PM'}`;};
-const longDate=d=>new Date(d+'T12:00:00Z').toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'});
-const et=iso=>new Date(iso).toLocaleString('en-US',{timeZone:'America/New_York',weekday:'short',hour:'numeric',minute:'2-digit'});
-function when(s){return s.days==='once'?longDate(s.once_date):dayNames[s.days];}
+const longDate=d=>new Date(d+'T12:00:00Z').toLocaleDateString('en-US',{timeZone:'UTC',weekday:'long',month:'long',day:'numeric',year:'numeric'});
+const shortDate=d=>new Date(d+'T12:00:00Z').toLocaleDateString('en-US',{timeZone:'UTC',weekday:'short',month:'short',day:'numeric'});
+const et=iso=>new Date(iso).toLocaleString('en-US',{timeZone:'America/New_York',weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+const quiet=at=>at>=state.quiet.start||at<state.quiet.end;
+function until(iso){const m=Math.round((Date.parse(iso)-Date.now())/60000);if(m<=0)return 'time has passed';const d=Math.floor(m/1440),h=Math.floor(m%1440/60),mm=m%60;return 'in '+[d&&d+' d',h&&h+' h',(!d&&mm)&&mm+' min'].filter(Boolean).join(' ');}
+const mode=s=>s.until_ack?'keep_calling':s.retry_minutes?'retry':'none';
 function extras(s){
  const parts=[`Message plays ${s.repeats}×`];
- parts.push(s.snooze_minutes?`press 2 snoozes ${s.snooze_minutes} min (${s.max_snoozes===1?'once':'up to '+s.max_snoozes+'×'})`:'no snooze');
- parts.push(s.retry_minutes?`if unanswered, calls again every ${s.retry_minutes} min up to ${s.max_retries}×`:'no retry if unanswered');
+ parts.push(s.snooze_minutes?`press 2 snoozes ${s.snooze_minutes} min (once)`:'no snooze');
+ const m=s.if_unacknowledged||mode(s), every=s.retry_every_minutes||s.retry_minutes;
+ parts.push(m==='keep_calling'?`if you don't press 1, calls again every ${every} min until you do (stops at quiet hours or after 2 h)`:m==='retry'?`if you don't press 1, calls again every ${every} min up to ${s.max_retries}×`:'no repeat calls');
+ if(s.late_ok||s.allow_quiet_hours)parts.push('ALLOWED during quiet hours');
  return parts.join(' · ');
 }
-function spokenText(s){return s.snooze_minutes?s.message+` Press 1 if you're up. Press 2 to snooze for ${s.snooze_minutes} minutes.`:s.message;}
-function renderPlans(){
- $('plans').replaceChildren();
- for(const p of state.plans){
-  const card=el('article','card plan'+(p.status==='pending'?' pending':''));
-  const top=el('div','top');top.append(el('h2','',p.title),el('span','badge'+(p.status==='approved'?' on':''),{pending:'Waiting for your OK',approved:'Approved',rejected:'Rejected',expired:'Expired'}[p.status]||p.status));
-  card.append(top,el('div','muted','From Instinct · received '+et(p.received_at)+' ET · '+p.calls.length+' call'+(p.calls.length===1?'':'s')));
-  if(p.note)card.append(el('p','',p.note));
-  if(p.status!=='pending'){card.append(el('p','muted',p.result||''));$('plans').append(card);continue;}
+function spokenText(s){
+ const m=s.if_unacknowledged||mode(s);
+ if(!s.snooze_minutes&&m==='none')return s.message;
+ if(s.snooze_minutes)return s.message+` Press 1 if you're up. Press 2 to snooze for ${s.snooze_minutes} minutes.`;
+ return s.message+(m==='keep_calling'?" Press 1 when you're getting out of bed. I'll keep calling until you do.":' Press 1 to confirm.');
+}
+function readiness(){
+ if(!state.callingConnected)return 'Calling is not connected: approved calls would be saved but cannot ring.';
+ if(state.paused)return 'Master pause is ON: approved calls are saved but will not ring until you resume calling.';
+ return 'Calling is on: approved calls will ring at the times shown.';
+}
+const STATUS={pending:'Waiting for your OK',approving:'Approving…',approved:'Approved',rejected:'Rejected',expired:'Expired'};
+function renderDrafts(){
+ $('drafts').replaceChildren();
+ for(const d of state.drafts){
+  const card=el('article','card plan'+(d.status==='pending'?' pending':''));
+  const top=el('div','top');top.append(el('h2','',d.title),el('span','badge'+(d.status==='approved'?' on':''),STATUS[d.status]||d.status));
+  card.append(top,el('div','muted',`Draft ${d.id} · ${d.via==='paste'?'pasted by you':'sent by Instinct'} · received ${et(d.received_at)} ET`));
+  if(d.note)card.append(el('p','',d.note));
+  if(d.status!=='pending'){card.append(el('p','muted',d.result||''));$('drafts').append(card);continue;}
   const list=el('ol','plan-calls');
-  for(const c of [...p.calls].sort((a,b)=>(a.once_date+a.at).localeCompare(b.once_date+b.at))){
-   const li=el('li');li.append(el('div','plan-when',when(c)+' · '+t12(c.at)),el('strong','',c.label),el('div','quote','“'+spokenText(c)+'”'),el('div','muted',extras(c)));list.append(li);
+  for(const c of d.commands){
+   const li=el('li');
+   if(c.action==='cancel'){
+    const t=c.target;
+    li.append(el('div','plan-when danger-text','CANCEL'),el('strong','',t?.label||c.reminder_id),el('div','muted',t?`${et(t.call_at)} ET · currently ${t.status==='cancelled'?'already cancelled':t.enabled?'armed':'already ran or turned off'} · revision ${t.revision??'?'} (expects ${c.expected_revision})`:'Unknown reminder'),el('div','muted','Reminder '+c.reminder_id));
+   } else {
+    const q=quiet(c.local.at);
+    li.append(el('div','plan-when',`${longDate(c.local.date)} · ${t12(c.local.at)} ${c.timezone} (UTC${c.local.offset}) · ${until(c.call_at)}`),el('strong','',c.label),
+     el('div','quote','“'+spokenText({...c,...c.policy})+'”'),el('div','muted',extras({...c.policy,message:c.message})),
+     el('div','muted',`Calls your phone ending 0221 · reminder ${c.reminder_id}`+(c.planned_text_at?` · text planned ${et(c.planned_text_at)} ET`:'')));
+    if(q)li.append(el('div','danger-text','Quiet hours: approving this allows a call between 10:30 PM and 5:00 AM.'));
+   }
+   list.append(li);
   }
-  card.append(list,el('p','muted','Approving adds these as schedules and turns them on. '+(state.paused?'Master pause is on, so nothing will call until you resume calling.':'They can call at the times shown.')+' You can still edit or delete each one afterwards.'));
+  card.append(list,el('p','muted',readiness()+' Calls whose time has passed are not scheduled. You can still edit or delete each one afterwards.'));
   const actions=el('div','actions');
-  const ok=el('button','','Approve and turn on');ok.onclick=async()=>{if(await confirmAction('Approve this plan?',`Adds ${p.calls.length} call${p.calls.length===1?'':'s'} to your schedules and turns them on. Calls whose time has already passed are skipped.`,'Approve'))await change('plan/approve',{id:p.id});};
-  const no=el('button','danger','Reject');no.onclick=async()=>{if(await confirmAction('Reject this plan?','Nothing from it will be added. Instinct can send a corrected plan.','Reject plan'))await change('plan/reject',{id:p.id});};
-  actions.append(ok,no);card.append(actions);$('plans').append(card);
+  const ok=el('button','','Approve');ok.onclick=async()=>{if(await confirmAction('Approve this draft exactly as shown?',`${d.commands.length} change${d.commands.length===1?'':'s'}. New calls are turned on; cancellations take effect now.`,'Approve'))await change('draft/approve',{id:d.id,hash:d.hash});};
+  const no=el('button','danger','Reject');no.onclick=async()=>{if(await confirmAction('Reject this draft?','Nothing in it is scheduled or cancelled. Instinct can send a corrected proposal.','Reject draft'))await change('draft/reject',{id:d.id,hash:d.hash});};
+  actions.append(ok,no);card.append(actions);$('drafts').append(card);
  }
 }
 function renderFollowups(){
  $('followups').replaceChildren();
  if(!state.followups.length)return;
- const card=el('div','card');card.append(el('h2','','Coming up: snoozes and retries'));
+ const card=el('div','card');card.append(el('h2','','Coming up: snoozes and repeat calls'));
  for(const f of state.followups){
-  const row=el('div','activity top');row.append(el('span','',`${f.label} · ${f.kind==='snooze'?'snooze':'retry'} call at ${et(f.due_at)} ET`));
-  const b=el('button','secondary','Cancel');b.onclick=async()=>{if(await confirmAction('Cancel this call?','The '+f.kind+' call for '+f.label+' will not be placed.','Cancel call'))await change('followup/cancel',{id:f.id});};
+  const row=el('div','activity top');row.append(el('span','',`${f.label} · ${f.kind==='snooze'?'snoozed call':'repeat call'} at ${et(f.due_at)} ET`));
+  const b=el('button','secondary','Cancel');b.onclick=async()=>{if(await confirmAction('Cancel this call?','This '+(f.kind==='snooze'?'snoozed':'repeat')+' call for '+f.label+' will not be placed, and no further ones will follow from it.','Cancel call'))await change('followup/cancel',{id:f.id});};
   row.append(b);card.append(row);
  }
  $('followups').append(card);
 }
+function policyFields(){
+ const m=$('if_unacknowledged').value;
+ $('retry-row').hidden=m==='none';$('max-retries-box').hidden=m!=='retry';
+ $('policy-note').textContent=($('snooze_minutes').value!=='0'?'The call ends with "Press 1 if you\'re up. Press 2 to snooze." After the snooze, it says "Press 1 when you\'re getting out of bed." ':'')+(m==='keep_calling'?'Hanging up, voicemail or any other key counts as not pressing 1. Repeat calls stop when you press 1, at 10:30 PM unless allowed, or after 2 hours as a safety limit.':'');
+}
 function reset() {$('editor').reset();$('id').value='';$('form-title').textContent='New schedule';$('cancel').hidden=true;dates();}
-function dates() {followupFields();$('date-row').hidden=$('days').value!=='once';$('once').required=$('days').value==='once';}
+function dates() {policyFields();$('date-row').hidden=$('days').value!=='once';$('once').required=$('days').value==='once';}
 function render() {
- renderPlans();renderFollowups();
+ renderDrafts();renderFollowups();
  $('status').textContent=!state.callingConnected?'Calling is not connected. This interface saves schedules only. Owner setup is required before calls can work.':state.paused?'All calling is paused. Schedules can be saved, but none will call until you resume calling here.':'Calling is enabled. Only schedules marked On can place calls.';
  $('global-badge').textContent=state.paused?'Paused':'Enabled';
  $('pause-note').textContent=state.paused?'You control when calling resumes. No assistant action is needed.':'Pause every schedule at once without deleting it.';
@@ -78,9 +110,9 @@ function render() {
  if(!state.schedules.length){const empty=el('div','card empty');empty.append(el('div','icon','◷'),el('h3','','A quieter way to plan'),el('p','muted','Start with a time and a message. Your saved alarms will appear here.'));$('schedules').append(empty);}
  for(const s of state.schedules){
   const card=el('article','card');const top=el('div','top');top.append(el('h3','',s.label),el('span','badge'+(s.enabled?' on':''),s.enabled?'On':'Off'));
-  card.append(top,el('div','time',s.at),el('div','muted',(s.days==='once'?longDate(s.once_date)+' · One time':dayNames[s.days])+' · Eastern Time'+(String(s.source||'').startsWith('plan:')?' · from a plan':'')),el('div','quote',spokenText(s)),el('p','muted',extras(s)));
+  card.append(top,el('div','time',s.at),el('div','muted',(s.days==='once'?shortDate(s.once_date)+' · One time':dayNames[s.days])+' · Eastern Time'+(s.reminder_id?` · reminder ${s.reminder_id} rev ${s.revision}`:'')),el('div','quote',spokenText(s)),el('p','muted',extras(s)));
   const actions=el('div','actions');
-  const edit=el('button','secondary','Edit');edit.onclick=()=>{for(const key of FIELDS)$(key).value=s[key]||(key==='max_snoozes'||key==='max_retries'?(key==='max_snoozes'?1:2):s[key]);$('once').value=s.once_date;$('enabled').checked=!!s.enabled;$('form-title').textContent='Edit schedule';$('cancel').hidden=false;dates();$('editor').scrollIntoView({behavior:'smooth',block:'start'});};
+  const edit=el('button','secondary','Edit');edit.onclick=()=>{for(const key of ['id','label','at','days','message','repeats','snooze_minutes'])$(key).value=s[key];$('if_unacknowledged').value=mode(s);$('retry_minutes').value=s.retry_minutes||3;$('max_retries').value=s.max_retries||2;$('late_ok').checked=!!s.late_ok;$('once').value=s.once_date;$('enabled').checked=!!s.enabled;$('form-title').textContent='Edit schedule';$('cancel').hidden=false;dates();$('editor').scrollIntoView({behavior:'smooth',block:'start'});};
   const toggle=el('button','secondary',s.enabled?'Turn off':'Turn on');toggle.onclick=async()=>{if(s.enabled||await confirmAction('Turn on this schedule?',state.paused?'Master pause is still on. This schedule can call after you resume calling.':'This schedule can place a call at its next selected time. Existing call-service charges apply.','Turn on'))await change('toggle',{id:s.id});};
   const del=el('button','danger','Delete');del.onclick=async()=>{if(await confirmAction('Delete this schedule?',s.label+' at '+s.at+' will be removed. Past activity stays in your history.','Delete schedule'))await change('delete',{id:s.id});};
   const test=el('button','secondary','Test call now');test.disabled=!state.callingConnected;test.onclick=async()=>{if(await confirmAction('Call your phone now?','Places one real call with this message right away, even while calling is paused. Existing call-service charges apply.','Call now'))await change('test',{id:s.id});};
@@ -91,8 +123,9 @@ function render() {
  for(const r of state.runs){const item=el('div','activity');item.append(el('strong','',r.label),el('br'),document.createTextNode(new Date(r.started_at).toLocaleString('en-US',{timeZone:'America/New_York'})+' ET · '+r.result));$('activity').append(item);}
 }
 $('days').onchange=dates;
-function followupFields(){$('max_snoozes').disabled=$('snooze_minutes').value==='0';$('max_retries').disabled=$('retry_minutes').value==='0';}
-$('snooze_minutes').onchange=followupFields;$('retry_minutes').onchange=followupFields;
+$('snooze_minutes').onchange=policyFields;$('if_unacknowledged').onchange=policyFields;
+$('paste-go').onclick=async()=>{const text=$('paste').value.trim();if(!text)return;if(busy)return;busy=true;error('');
+ try{const r=await api('draft/paste',{text});$('paste').value='';await refresh();$('status').textContent=r.draft_id?'Proposal staged as a draft. Review it at the top before approving.':'Already received earlier; nothing new was staged.';}catch(e){error(e.message);}finally{busy=false;}};
 $('cancel').onclick=reset;
 $('pause').onclick=async()=>{
  if(state.paused&&!await confirmAction('Resume calling?', 'Enabled schedules can place calls at the times you choose. Your existing call-service charges still apply. A call already being sent cannot be recalled.','Resume calling'))return;
@@ -101,7 +134,7 @@ $('pause').onclick=async()=>{
 $('editor').onsubmit=async event=>{
  event.preventDefault();if(busy)return;
  const s={};for(const key of FIELDS)s[key]=NUMS.includes(key)?Number($(key).value):$(key).value;
- s.once_date=$('once').value;s.enabled=$('enabled').checked;
+ s.once_date=$('once').value;s.enabled=$('enabled').checked;s.late_ok=$('late_ok').checked;
  if(s.enabled&&!state.paused&&!await confirmAction('Save an enabled schedule?', 'It can place a call at its next selected time. Existing call-service charges apply.','Save and enable'))return;
  busy=true;$('save').disabled=true;error('');
  try {await api('save',s);reset();await refresh();$('status').textContent='Schedule saved. '+(state.paused?'All calling remains paused.':'Only enabled schedules can call.');}catch(e){error(e.message);}finally{busy=false;$('save').disabled=false;}
