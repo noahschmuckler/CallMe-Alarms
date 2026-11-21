@@ -1,0 +1,18 @@
+name = "callme-alarms"
+main = "src/worker.js"
+compatibility_date = "2026-11-20"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "callme-alarms"
+database_id = "dd08c66d-024f-402e-8ef8-2318a617db8b"
+
+# Secrets (set with `wrangler secret put`): UI_PASSWORD, CALLME_SECRET
+# Cron is intentionally not enabled yet. Once calling is wired:
+# [triggers]
+# crons = ["* * * * *"]
