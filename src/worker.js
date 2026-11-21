@@ -1,6 +1,6 @@
 // Owner-operated alarm UI and scheduler. A once-a-minute cron (wrangler.toml)
 // calls tick(); calls are placed through the existing CallMe backend on Railway.
-import { localParts, iso, minuteFloor, inQuietHours, spoken, nextStep, clock, QUIET_START, QUIET_END, MAX_SNOOZES } from './policy.js';
+import { localParts, iso, minuteFloor, inQuietHours, spoken, callOptions, nextStep, clock, QUIET_START, QUIET_END, MAX_SNOOZES } from './policy.js';
 import { submit, decideDraft, receipt, expireDrafts, IntakeError } from './intake.js';
 export { localParts, spoken, nextStep };
 const DAYS = ['0,1,2,3,4', '0,1,2,3,4,5,6', '5,6', 'once'];
@@ -104,7 +104,7 @@ export async function tick(env, when, dispatch) {
 async function send(env,key,s,chain,dispatch){
   let result='Uncertain or failed. Not retried.', callId=null;
   try {
-    callId=await dispatch({...s,message:spoken(s,chain)},chain);
+    callId=await dispatch({...s,message:spoken(s,chain),call_options:callOptions(s,chain)},chain);
     result='Call requested';
   } catch { /* Never retry an ambiguous call request. */ }
   await env.DB.prepare('UPDATE runs SET result=?,call_id=?,decided=? WHERE fire_key=?').bind(result,callId,callId?0:1,key).run();
@@ -117,7 +117,7 @@ export async function placeCall(env,s,extra={}) {
   if(!env.CALLME_SECRET)throw Error('Calling is not configured');
   const r=await fetch(CALLME+'/v1/call',{
     method:'POST',headers:{'Authorization':'Bearer '+env.CALLME_SECRET,'Content-Type':'application/json'},
-    body:JSON.stringify({to:TO,message:s.message,repeat:s.repeats,metadata:{alarm_schedule_id:s.id,...extra}}),
+    body:JSON.stringify({to:TO,message:s.message,repeat:s.repeats,...(s.call_options||{}),metadata:{alarm_schedule_id:s.id,...extra}}),
     signal:AbortSignal.timeout(20000),
   });
   if(r.status!==202)throw Error('Call request failed: '+r.status);
@@ -151,8 +151,8 @@ export async function followUp(env,now=Date.now(),fetcher=fetch) {
     }
     const s=run.fire_key.startsWith('test|')?null:await env.DB.prepare('SELECT * FROM schedules WHERE id=?').bind(run.schedule_id).first();
     const step=nextStep(s,run,j,now);
-    const acknowledged=j.acknowledged===true||digits==='1';
-    let note='',outcome=acknowledged?'acknowledged':'not_acknowledged';
+    const acknowledged=j.acknowledged===true||digits==='1'||digits==='3';
+    let note=digits==='3'?' · spoken update recorded':'',outcome=digits==='3'?'spoken_update':acknowledged?'acknowledged':'not_acknowledged';
     if(step&&!step.stop){
       // Atomic: no follow-up if the schedule was cancelled or turned off while this call was in progress.
       const ins=await env.DB.prepare(`INSERT OR IGNORE INTO followups(id,parent_key,schedule_id,kind,due_at,snoozes,retries,chain_started,created_at)
@@ -282,7 +282,7 @@ export default {
     await env.DB.prepare("INSERT INTO runs(fire_key,schedule_id,label,started_at,result,decided) VALUES(?,?,?,?,'Sending',1)").bind(key,sched.id,'Test: '+sched.label,iso(Date.now())).run();
     let result='Test failed. Check the CallMe backend.',callId=null;
     // A test speaks the same menu, but its keypresses never start a snooze or repeat call.
-    try {callId=await placeCall(env,{...sched,message:spoken(sched)},{test:true});result='Test call requested';} catch {}
+    try {callId=await placeCall(env,{...sched,message:spoken(sched),call_options:callOptions(sched,{snoozes:0},{test:true})},{test:true});result='Test call requested';} catch {}
     await env.DB.prepare('UPDATE runs SET result=?,call_id=? WHERE fire_key=?').bind(result,callId,key).run();
     return callId?response({ok:true}):response({error:result},502);
    }

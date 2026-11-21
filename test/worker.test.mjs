@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {makeDB} from './d1.mjs';
-import worker,{tick,followUp,spoken} from '../src/worker.js';
+import worker,{tick,followUp,spoken,placeCall} from '../src/worker.js';
+import {callOptions} from '../src/policy.js';
 import {submit,decideDraft,receipt,parseInstant} from '../src/intake.js';
 
 const MIN=60000;
@@ -43,7 +44,42 @@ test('spoken menu: snooze first, then "getting out of bed" until 1 is pressed',(
   const s={message:'Up.',snooze_minutes:30,max_snoozes:1,until_ack:1,retry_minutes:3};
   assert.match(spoken(s,{snoozes:0}),/Press 2 to snooze for 30 minutes/);
   assert.match(spoken(s,{snoozes:1}),/getting out of bed\. I'll keep calling/);
-  assert.equal(spoken({message:'Up.'}),'Up.');
+  assert.equal(spoken({message:'Up.'}),'Up. Press 3 to leave a spoken update.');
+  assert.match(spoken(s,{snoozes:0}),/minutes\. Press 3 to leave a spoken update\.$/);
+});
+
+test('call options: snooze time only while a snooze is on offer, press 3 always, never a snooze promise on tests',()=>{
+  const s={message:'Up.',snooze_minutes:30,max_snoozes:1,until_ack:1,retry_minutes:3};
+  assert.deepEqual(callOptions(s,{snoozes:0}),{spoken_update:true,snooze_minutes:30});
+  assert.deepEqual(callOptions(s,{snoozes:1}),{spoken_update:true});
+  assert.deepEqual(callOptions(s,{snoozes:0},{test:true}),{spoken_update:true});
+  assert.deepEqual(callOptions({message:'x'}),{spoken_update:true});
+});
+
+test('placeCall sends the keypad options to the backend',async()=>{
+  let body;const orig=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{body=JSON.parse(init.body);return {status:202,json:async()=>({call_id:'c9'})};};
+  try{await placeCall({CALLME_SECRET:'x'},{id:'s1',message:'Hi',repeats:1,call_options:{spoken_update:true,snooze_minutes:30}});}
+  finally{globalThis.fetch=orig;}
+  assert.equal(body.snooze_minutes,30);assert.equal(body.spoken_update,true);assert.equal(body.metadata.alarm_schedule_id,'s1');
+});
+
+test('snooze call goes out at the time the call announced',async()=>{
+  const env=setup();addSchedule(env);const b=backend();
+  await minute(env,b,T0);
+  b.status.c0={status:'completed',digits:'2',snooze_until:'2026-12-01T11:31:00Z'};   // said "6:31 AM"
+  await minute(env,b,T0+3*MIN);                              // result seen late
+  assert.equal(fus(env)[0].due_at,'2026-12-01T11:31:00.000Z');
+});
+
+test('press 3 (spoken update) counts as an answer: no more calls',async()=>{
+  const env=setup();addSchedule(env);const b=backend();
+  await minute(env,b,T0);
+  b.status.c0={status:'completed',digits:'3',acknowledged:true};
+  for(let t=T0+MIN;t<T0+40*MIN;t+=MIN)await minute(env,b,t);
+  assert.equal(b.calls.length,1);assert.equal(fus(env).length,0);
+  assert.deepEqual(all(env,'SELECT outcome FROM events').map(e=>e.outcome),['spoken_update']);
+  assert.match(all(env,'SELECT result FROM runs')[0].result,/spoken update recorded/);
 });
 
 test('press 2 snoozes once; then hang-ups, voicemail and 2 keep it calling until 1 is pressed',async()=>{

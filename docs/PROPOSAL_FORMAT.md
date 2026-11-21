@@ -76,7 +76,7 @@ One command, or an envelope holding several (reviewed and approved together as o
 | `call_at` | RFC 3339 with seconds `00` and a numeric offset, e.g. `2026-12-07T19:30:00-05:00`. The offset must be New York's offset at that moment. Rejected: `Z`, wrong offsets, times skipped by the spring-forward change, times in the repeated fall-back hour, and anything less than 2 minutes in the future. |
 | `planned_text_at` | Optional, same format, not after `call_at`. Stored and shown to Noah; it never moves the call. |
 | `timezone` | Exactly `America/New_York`. |
-| `message` | 1-700 characters (the keypad menu is added after it, keeping the total within the 800-character call limit). |
+| `message` | 1-700 characters (the keypad menu is added after it, keeping the total within the 1,000-character call limit). |
 | `policy` | Required object; `{}` means one call, no snooze, no repeat calls. Fields below. |
 | `policy.repeats` | 1-5, default 1. Times the message plays within one call. |
 | `policy.snooze_minutes` | 0-60, default 0 (off). |
@@ -94,10 +94,15 @@ Drafts not reviewed within 7 days expire.
 
 - **Menu.** With snooze on, the call ends "Press 1 if you're up. Press 2 to snooze for 30 minutes."
   After the snooze is used: "Press 1 when you're getting out of bed. I'll keep calling until you do."
-  (or "Press 1 to confirm." for `retry`).
+  (or "Press 1 to confirm." for `retry`). Every call then adds "Press 3 to leave a spoken update."
 - **Press 1:** done. Recorded as a response event. Nothing more is called.
-- **Press 2, snooze left:** CallMe itself schedules one call `snooze_minutes` after it sees the keypress
-  (normally within a minute of the call ending). Max 1 snooze.
+- **Press 2, snooze left:** the call answers "Okay, snoozed. I'll call you back at 7:01 AM. Goodbye."
+  (`snooze_minutes` after the keypress, rounded up to the minute), and CallMe places one call at exactly
+  that time. Max 1 snooze.
+- **Press 3, spoken update:** counts as an answer (nothing more is called). After a recording notice and a
+  beep, Noah speaks for up to 45 minutes; it ends after 60 seconds of silence or on #. After the call the
+  phone backend transcribes it and saves the transcript to Google Drive (CallMe folder). Audio is deleted
+  from Twilio after 7 days.
 - **Not acknowledged** (hang-up, no answer, voicemail, any other key, or 2 with no snooze left):
   - `keep_calling`: calls again every `retry_every_minutes` until 1 is pressed.
   - `retry`: calls again up to `max_retries` times.
@@ -146,7 +151,7 @@ Receipt example (create, after the call):
 }
 ```
 
-Event `outcome`: `acknowledged`, `snoozed`, `calling_again`, `quiet_hours`, `safety_stop`, `policy_done`
+Event `outcome`: `acknowledged`, `spoken_update`, `snoozed`, `calling_again`, `quiet_hours`, `safety_stop`, `policy_done`
 (policy allowed no more calls), `cancelled`, `not_acknowledged` (no policy). "Acknowledged" means 1 was
 pressed on the call. It does not prove who pressed it, and it is not verified task completion.
 
@@ -179,11 +184,9 @@ a second draft or call. Copy/paste and the inbox converge on the same `command_i
 
 ## 8. Not built yet
 
-- **Press 3, spoken update** (recording, transcription, consent, retention, getting the update back to
-  the assistant). This needs the phone backend on Railway, whose live source is not in any repository.
-  Recover and commit it first; recording consent and retention are Noah's decisions.
-- **Saying the new time after press 2** ("Snoozed until 7:01") is also a phone-backend change. Until then,
-  the backend's own wording after a keypress applies.
+- **Delivering spoken updates to Instinct directly.** Transcripts are saved to Drive; a direct route
+  (signed webhook, email, or Instinct checking Drive) is Instinct's choice. The phone backend's source is
+  in `noahschmuckler/callme-server`.
 - **Transport.** No email, text or webhook sender is set up. The inbox endpoint exists for one; enabling it
   needs Noah to set `PLAN_TOKEN` and choose the sender.
 - **Snooze by text message** is not supported.
