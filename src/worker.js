@@ -1,4 +1,5 @@
-// Owner-operated alarm UI and scheduler. No active cron is shipped in config.
+// Owner-operated alarm UI and scheduler. A once-a-minute cron (wrangler.toml)
+// calls tick(); calls are placed through the existing CallMe backend on Railway.
 const DAYS = ['0,1,2,3,4', '0,1,2,3,4,5,6', '5,6', 'once'];
 const security = {
   'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY',
@@ -69,6 +70,42 @@ export async function tick(env, when, dispatch) {
     if(s.days==='once')await env.DB.prepare('UPDATE schedules SET enabled=0 WHERE id=?').bind(s.id).run();
   }
 }
+const CALLME='https://callme-server-production-f24a.up.railway.app';
+const TO='+16107240221';
+// Ask the existing Railway CallMe backend (which owns the Twilio credentials) to
+// place one call now. Returns the backend's call_id, or throws.
+export async function placeCall(env,s,extra={}) {
+  if(!env.CALLME_SECRET)throw Error('Calling is not configured');
+  const r=await fetch(CALLME+'/v1/call',{
+    method:'POST',headers:{'Authorization':'Bearer '+env.CALLME_SECRET,'Content-Type':'application/json'},
+    body:JSON.stringify({to:TO,message:s.message,repeat:s.repeats,metadata:{alarm_schedule_id:s.id,...extra}}),
+    signal:AbortSignal.timeout(20000),
+  });
+  if(r.status!==202)throw Error('Call request failed: '+r.status);
+  return (await r.json()).call_id;
+}
+const FINAL=['completed','busy','no-answer','failed','canceled','acknowledged','error'];
+// After a request, ask the backend how the call went and record it in the
+// activity log, so "Call requested" becomes e.g. "completed" or "no-answer".
+async function followUp(env) {
+  if(!env.CALLME_SECRET)return;
+  const since=new Date(Date.now()-30*60000).toISOString();
+  const open=await env.DB.prepare("SELECT fire_key,call_id,result FROM runs WHERE call_id IS NOT NULL AND started_at>=? ORDER BY started_at DESC LIMIT 5").bind(since).all();
+  for(const run of open.results) {
+    const base=run.result.split(' · ')[0];
+    const last=(run.result.split(' · ')[1]||'').toLowerCase();
+    if(FINAL.some(f=>last.startsWith(f)))continue;
+    try {
+      const r=await fetch(CALLME+'/v1/call/'+encodeURIComponent(run.call_id),{headers:{'Authorization':'Bearer '+env.CALLME_SECRET},signal:AbortSignal.timeout(10000)});
+      if(!r.ok)continue;
+      const j=await r.json();
+      let status=String(j.status||'').slice(0,40);
+      const ack=j.acknowledged??j.ack??j.acknowledgement;
+      if(ack===true||(ack&&typeof ack==='object'))status+=status?', acknowledged':'acknowledged';
+      if(status)await env.DB.prepare('UPDATE runs SET result=? WHERE fire_key=?').bind(base+' · '+status,run.fire_key).run();
+    } catch { /* Status is informational only. */ }
+  }
+}
 export default {
  async fetch(req,env) {
   if(!env.UI_PASSWORD)return new Response('Owner login is not configured.',{status:503,headers:security});
@@ -124,6 +161,19 @@ export default {
     }
     return response({ok:true});
    }
+   if(url.pathname==='/api/test') {
+    if(!env.CALLME_SECRET)return response({error:'Calling is not connected. Owner activation is required.'},409);
+    const sched=await env.DB.prepare('SELECT * FROM schedules WHERE id=?').bind(s.id).first();
+    if(!sched)return response({error:'Not found'},404);
+    const recent=await env.DB.prepare("SELECT count(*) AS n FROM runs WHERE fire_key LIKE 'test|%' AND started_at>=?").bind(new Date(Date.now()-60000).toISOString()).first();
+    if(recent.n)return response({error:'Wait a minute between test calls.'},429);
+    const key='test|'+crypto.randomUUID();
+    await env.DB.prepare("INSERT INTO runs(fire_key,schedule_id,label,started_at,result) VALUES(?,?,?,?,'Sending')").bind(key,sched.id,'Test: '+sched.label,new Date().toISOString()).run();
+    let result='Test failed. Check the CallMe backend.',callId=null;
+    try {callId=await placeCall(env,sched,{test:true});result='Test call requested';} catch {}
+    await env.DB.prepare('UPDATE runs SET result=?,call_id=? WHERE fire_key=?').bind(result,callId,key).run();
+    return callId?response({ok:true}):response({error:result},502);
+   }
    if(url.pathname==='/api/toggle') {
     await env.DB.prepare('UPDATE schedules SET enabled=1-enabled WHERE id=?').bind(s.id).run();return response({ok:true});
    }
@@ -135,19 +185,12 @@ export default {
  },
  async scheduled(event,env,ctx) {
    // Scheduled dispatch is independent of the UI browser and any assistant.
-   // Free quota exhaustion or dispatch errors fail closed; no call retries.
-   // Skip late events instead of placing a surprise catch-up call.
-   if(Math.abs(Date.now()-event.scheduledTime)>60000)return;
-   await tick(env,event.scheduledTime,async s=>{
-    if(!env.CALLME_SECRET)throw Error('Calling is not configured');
-    const r=await fetch('https://callme-server-production-f24a.up.railway.app/v1/call',{
-      method:'POST',headers:{'Authorization':'Bearer '+env.CALLME_SECRET,'Content-Type':'application/json'},
-      body:JSON.stringify({to:'+16107240221',message:s.message,repeat:s.repeats,metadata:{alarm_schedule_id:s.id}}),
-      signal:AbortSignal.timeout(20000),
-    });
-    if(r.status!==202)throw Error('Call request failed');
-    return (await r.json()).call_id;
-   });
+   // Dispatch errors fail closed; no call retries. Cron runs can start a little
+   // late, so allow up to 5 minutes before treating an event as stale. The
+   // fire_key claim in tick() still stops any duplicate within a minute.
+   if(Math.abs(Date.now()-event.scheduledTime)>5*60000)return;
+   await tick(env,event.scheduledTime,s=>placeCall(env,s));
+   await followUp(env);
    // Keep a bounded 90-day activity ledger. Schedule history is independent of
    // Railway's existing call history, which is neither copied nor modified.
    await env.DB.prepare('DELETE FROM runs WHERE started_at < ?').bind(new Date(event.scheduledTime-90*86400000).toISOString()).run();
