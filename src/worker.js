@@ -117,7 +117,7 @@ export async function placeCall(env,s,extra={}) {
   if(!env.CALLME_SECRET)throw Error('Calling is not configured');
   const r=await fetch(CALLME+'/v1/call',{
     method:'POST',headers:{'Authorization':'Bearer '+env.CALLME_SECRET,'Content-Type':'application/json'},
-    body:JSON.stringify({to:TO,message:s.message,repeat:s.repeats,...(s.call_options||{}),metadata:{alarm_schedule_id:s.id,...extra}}),
+    body:JSON.stringify({to:TO,message:s.message,repeat:s.repeats,...(s.call_options||{}),metadata:{alarm_schedule_id:s.id,...(s.reminder_id?{reminder_id:s.reminder_id}:{}),...(s.revision?{schedule_revision:s.revision}:{}),...extra}}),
     signal:AbortSignal.timeout(20000),
   });
   if(r.status!==202)throw Error('Call request failed: '+r.status);

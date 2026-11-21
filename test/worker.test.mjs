@@ -59,9 +59,10 @@ test('call options: snooze time only while a snooze is on offer, press 3 always,
 test('placeCall sends the keypad options to the backend',async()=>{
   let body;const orig=globalThis.fetch;
   globalThis.fetch=async(url,init)=>{body=JSON.parse(init.body);return {status:202,json:async()=>({call_id:'c9'})};};
-  try{await placeCall({CALLME_SECRET:'x'},{id:'s1',message:'Hi',repeats:1,call_options:{spoken_update:true,snooze_minutes:30}});}
+  try{await placeCall({CALLME_SECRET:'x'},{id:'s1',reminder_id:'rem-1',revision:2,message:'Hi',repeats:1,call_options:{spoken_update:true,snooze_minutes:30}});}
   finally{globalThis.fetch=orig;}
   assert.equal(body.snooze_minutes,30);assert.equal(body.spoken_update,true);assert.equal(body.metadata.alarm_schedule_id,'s1');
+  assert.equal(body.metadata.reminder_id,'rem-1');assert.equal(body.metadata.schedule_revision,2);
 });
 
 test('snooze call goes out at the time the call announced',async()=>{
