@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
+    "test": "node --test test/*.test.mjs",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute callme-alarms --remote --file=schema.sql"
   },
