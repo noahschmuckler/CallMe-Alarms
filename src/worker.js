@@ -110,6 +110,8 @@ async function send(env,key,s,chain,dispatch){
   await env.DB.prepare('UPDATE runs SET result=?,call_id=?,decided=? WHERE fire_key=?').bind(result,callId,callId?0:1,key).run();
 }
 const CALLME='https://callme-server-production-f24a.up.railway.app';
+export const BRAIN_DUMP_MESSAGE='Brain dump. Press 1 to start recording.';
+export const BRAIN_DUMP_OPTIONS={spoken_update:true,update_digit:'1',update_kind:'brain_dump'};
 const TO='+16107240221';
 // Ask the existing Railway CallMe backend (which owns the Twilio credentials) to
 // place one call now. Returns the backend's call_id, or throws.
@@ -298,6 +300,18 @@ export default {
    }
    if(url.pathname==='/api/followup/cancel') {
     await env.DB.prepare("UPDATE followups SET status='cancelled' WHERE id=? AND status='pending'").bind(s.id).run();return response({ok:true});
+   }
+   if(url.pathname==='/api/braindump') {
+    // Owner-initiated call: press 1 records a brain dump for Instinct (transcribed, saved to Drive, emailed).
+    if(!env.CALLME_SECRET)return response({error:'Calling is not connected.'},409);
+    const recent=await env.DB.prepare("SELECT count(*) AS n FROM runs WHERE fire_key LIKE 'dump|%' AND started_at>=?").bind(iso(Date.now()-60000)).first();
+    if(recent.n)return response({error:'A brain dump call was just requested. Wait a minute before asking again.'},429);
+    const key='dump|'+crypto.randomUUID();
+    await env.DB.prepare("INSERT INTO runs(fire_key,schedule_id,label,started_at,result,decided) VALUES(?,?,?,?,'Sending',1)").bind(key,'braindump','Brain dump',iso(Date.now())).run();
+    let result='Brain dump call failed. Check the CallMe backend.',callId=null;
+    try{callId=await placeCall(env,{id:'braindump',message:BRAIN_DUMP_MESSAGE,repeats:2,call_options:BRAIN_DUMP_OPTIONS},{brain_dump:true});result='Brain dump call requested';}catch{}
+    await env.DB.prepare('UPDATE runs SET result=?,call_id=? WHERE fire_key=?').bind(result,callId,key).run();
+    return callId?response({ok:true}):response({error:result},502);
    }
    if(url.pathname==='/api/proposals/check') {
     // Ask Noah's Apps Script to look for Instinct's proposal emails right now (it also runs every minute).

@@ -358,3 +358,21 @@ test('Check email now asks the helper script and reports what it staged',async()
     assert.equal(off.status,409);
   }finally{globalThis.fetch=orig;}
 });
+
+test('Brain dump button places an immediate call where press 1 records a brain dump',async()=>{
+  const env={...setup()};let body;const orig=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{body=JSON.parse(init.body);return {status:202,json:async()=>({call_id:'cbd'})};};
+  const auth={'Authorization':'Basic '+btoa('u:pw'),'X-Alarm-UI':'1','Content-Type':'application/json','Origin':'https://x'};
+  try{
+    const r=await worker.fetch(new Request('https://x/api/braindump',{method:'POST',headers:auth,body:'{}'}),env);
+    assert.equal(r.status,200);
+    assert.deepEqual([body.message,body.spoken_update,body.update_digit,body.update_kind,body.snooze_minutes],
+      ['Brain dump. Press 1 to start recording.',true,'1','brain_dump',undefined]);
+    assert.equal(body.metadata.brain_dump,true);
+    const again=await worker.fetch(new Request('https://x/api/braindump',{method:'POST',headers:auth,body:'{}'}),env);
+    assert.equal(again.status,429);                                   // one per minute
+    const run=all(env,"SELECT * FROM runs WHERE fire_key LIKE 'dump|%'")[0];
+    assert.deepEqual([run.label,run.result,run.call_id,run.decided],['Brain dump','Brain dump call requested','cbd',1]);
+    await followUp(env,Date.now(),async()=>{throw Error('must not poll');});   // never starts snooze/repeat logic
+  }finally{globalThis.fetch=orig;}
+});

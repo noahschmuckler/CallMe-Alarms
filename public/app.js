@@ -112,7 +112,7 @@ function reset() {$('editor').reset();$('id').value='';$('form-title').textConte
 function dates() {policyFields();$('date-row').hidden=$('days').value!=='once';$('once').required=$('days').value==='once';}
 function render() {
  renderDrafts();renderFollowups();
- $('email-check').hidden=!state.emailCheck;$('email-check-note').hidden=!state.emailCheck;
+ $('email-check').hidden=!state.emailCheck;$('braindump').disabled=!state.callingConnected;$('email-check-note').hidden=!state.emailCheck;
  $('status').textContent=!state.callingConnected?'Calling is not connected. This interface saves schedules only. Owner setup is required before calls can work.':state.paused?'All calling is paused. Schedules can be saved, but none will call until you resume calling here.':'Calling is enabled. Only schedules marked On can place calls.';
  $('global-badge').textContent=state.paused?'Paused':'Enabled';
  $('pause-note').textContent=state.paused?'You control when calling resumes. No assistant action is needed.':'Pause every schedule at once without deleting it.';
@@ -136,6 +136,9 @@ function render() {
 }
 $('days').onchange=dates;
 $('snooze_minutes').onchange=policyFields;$('if_unacknowledged').onchange=policyFields;
+$('braindump').onclick=async()=>{if(busy)return;busy=true;error('');const b=$('braindump');b.disabled=true;
+ try{await api('braindump',{});await refresh();$('status').textContent='Calling you now. Press 1 when it asks, then talk. Press # or hang up when you\'re done.';}
+ catch(e){error(e.message);}finally{busy=false;b.disabled=false;}};
 $('email-check').onclick=async()=>{if(busy)return;busy=true;error('');const b=$('email-check');b.disabled=true;b.textContent='Checking…';
  try{const r=await api('proposals/check',{});await refresh();
   const parts=[];if(r.staged)parts.push(`${r.staged} new proposal${r.staged>1?'s':''} staged as draft${r.staged>1?'s':''}; review at the top`);
