@@ -304,7 +304,7 @@ export default {
     if(!env.HELPER_URL||!env.HELPER_KEY)return response({error:'Email check is not set up.'},409);
     let j;
     try{
-      const r=await fetch(env.HELPER_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:env.HELPER_KEY,action:'check'}),redirect:'follow',signal:AbortSignal.timeout(25000)});
+      const r=await fetch(env.HELPER_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({check_key:env.HELPER_KEY,action:'check'}),redirect:'follow',signal:AbortSignal.timeout(25000)});
       j=await r.json();
     }catch{return response({error:'Could not reach the email check. Try again in a minute.'},502);}
     if(!j||!j.ok)return response({error:'Email check failed: '+String((j&&j.error)||'unknown').slice(0,150)},502);

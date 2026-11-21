@@ -292,7 +292,7 @@ test('Check email now asks the helper script and reports what it staged',async()
   try{
     const r=await worker.fetch(new Request('https://x/api/proposals/check',{method:'POST',headers:auth,body:'{}'}),env);
     assert.equal(r.status,200);const j=await r.json();assert.equal(j.staged,1);
-    assert.deepEqual(sent.body,{key:'hk',action:'check'});assert.equal(sent.url,'https://script.test/exec');
+    assert.deepEqual(sent.body,{check_key:'hk',action:'check'});assert.equal(sent.url,'https://script.test/exec');
     const st=await (await worker.fetch(new Request('https://x/api/state',{headers:auth}),env)).json();
     assert.equal(st.emailCheck,true);
     const off=await worker.fetch(new Request('https://x/api/proposals/check',{method:'POST',headers:auth,body:'{}'}),setup());
