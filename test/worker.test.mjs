@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {makeDB} from './d1.mjs';
 import worker,{tick,followUp,spoken,placeCall} from '../src/worker.js';
 import {callOptions} from '../src/policy.js';
+import {buildReport,isoNY} from '../src/report.js';
 import {submit,decideDraft,receipt,parseInstant} from '../src/intake.js';
 
 const MIN=60000;
@@ -391,4 +392,61 @@ test('a replaced reminder is shown as Replaced and cannot be turned on or edited
   assert.equal(ed.status,409);
   const off=await worker.fetch(new Request('https://x/api/toggle',{method:'POST',headers:auth,body:JSON.stringify({id:live.id})}),env);
   assert.equal(off.status,200);                                     // the live one still works normally
+});
+
+const snapshot=env=>JSON.stringify(['settings','schedules','runs','followups','drafts','commands','reminders','events'].map(tb=>all(env,`SELECT * FROM ${tb} ORDER BY 1`)));
+
+test('status report: empty database is a valid report with nothing pending or armed',async()=>{
+  const env=setup();const {report,text}=await buildReport(env,NOW);
+  assert.equal(report.version,1);assert.match(report.report_id,/^rpt_/);assert.match(report.generated_at,/-05:00$/);
+  assert.deepEqual([report.pending_drafts.length,report.schedules.length,report.recent_calls.length,report.exceptions.length],[0,0,0,0]);
+  assert.match(text,/Waiting for Noah's decision \(0\):\n- none/);assert.match(text,/Will ring \(0\)/);
+});
+
+test('status report covers drafts, armed and replaced reminders, queued snoozes, call outcomes and exceptions, and changes nothing',async()=>{
+  const env=setup();await approved(env);                                  // armed 7:30 PM Dec 7
+  await post(env,replace({policy:{snooze_minutes:30}}));await approveLatest(env);   // replaced by 8:15 PM reminder with snooze
+  await post(env,create({command_id:'cmd-p',reminder_id:'rem-p',call_at:'2026-12-07T20:20:00-05:00',label:'Pending one'}));   // waiting, 5 min after the 8:15 one
+  await post(env,cancel({command_id:'cancel-old',expected_revision:1}));  // targets the already-replaced reminder
+  const b=backend();const T=Date.parse('2026-12-08T01:15:00Z');            // 8:15 PM: replacement rings
+  await minute(env,b,T);b.status.c0={status:'completed',digits:'2'};await minute(env,b,T+MIN);   // pressed 2: snooze queued
+  const before=snapshot(env);
+  const {report,text}=await buildReport(env,T+2*MIN);
+  assert.equal(snapshot(env),before);                                     // strictly read-only
+  assert.equal(report.pending_drafts.length,2);
+  const pend=report.pending_drafts.find(d=>d.commands[0].command_id==='cmd-p');assert.equal(pend.commands[0].call_at,'2026-12-07T20:20:00-05:00');
+  const old=report.schedules.find(s=>s.reminder_id==='rem-trash-1207');assert.deepEqual([old.state,old.lineage.replaced_by],['replaced','rem-trash-1207-b']);
+  const neu=report.schedules.find(s=>s.reminder_id==='rem-trash-1207-b');assert.equal(neu.lineage.replaces,'rem-trash-1207');
+  assert.equal(report.queued_follow_ups[0].kind,'snooze');assert.equal(report.queued_follow_ups[0].reminder_id,'rem-trash-1207-b');
+  const call=report.recent_calls[0];assert.deepEqual([call.keypad,call.app_action,call.derived.summary],['2','snoozed','answered, pressed 2']);
+  assert.ok(call.next_call&&call.next_call.status==='pending');
+  assert.ok(report.exceptions.some(e=>/cancel targets rem-trash-1207, which was already replaced by rem-trash-1207-b/.test(e)));
+  assert.match(text,/CallMe status report rpt_/);assert.match(text,/Dispatched does not mean answered/);
+});
+
+test('status report flags unknown outcomes, close armed calls and pause; route sends via the helper only',async()=>{
+  const env=setup();await approved(env);
+  await post(env,create({command_id:'cmd-2',reminder_id:'rem-2',call_at:'2026-12-07T19:40:00-05:00',label:'Close one'}));await approveLatest(env);
+  env.DB.raw.exec('UPDATE settings SET paused=1');
+  let {report}=await buildReport(env,NOW);
+  assert.ok(report.exceptions[0].startsWith('Master pause is ON'));
+  env.DB.raw.exec('UPDATE settings SET paused=0');
+  ({report}=await buildReport(env,NOW));
+  assert.ok(report.exceptions.some(e=>/within 15 minutes/.test(e)));
+  const b=backend();await minute(env,b,CALL);                             // dispatched, never reports back
+  ({report}=await buildReport(env,CALL+20*MIN));
+  assert.ok(report.exceptions.some(e=>/outcome still unknown/.test(e)));
+  const env2={...env,HELPER_URL:'https://script.test/exec',HELPER_KEY:'hk'};let sent;const orig=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{sent=JSON.parse(init.body);return {json:async()=>({ok:true,sent:true})};};
+  const auth={'Authorization':'Basic '+btoa('u:pw'),'X-Alarm-UI':'1','Content-Type':'application/json','Origin':'https://x'};
+  try{
+    const before=snapshot(env);
+    const r=await worker.fetch(new Request('https://x/api/report',{method:'POST',headers:auth,body:'{}'}),env2);
+    assert.equal(r.status,200);assert.equal(snapshot(env),before);
+    assert.deepEqual([sent.action,sent.report_key,typeof sent.json],['report','hk','string']);assert.equal(sent.key,undefined);
+    assert.match(sent.subject,/^CallMe status report rpt_/);assert.equal(JSON.parse(sent.json).report_id,(await r.json()).report_id);
+    globalThis.fetch=async()=>({json:async()=>({ok:false,error:'unauthorized'})});        // an older helper refuses
+    const bad=await worker.fetch(new Request('https://x/api/report',{method:'POST',headers:auth,body:'{}'}),env2);
+    assert.equal(bad.status,502);
+  }finally{globalThis.fetch=orig;}
 });

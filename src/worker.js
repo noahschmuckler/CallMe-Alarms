@@ -2,6 +2,7 @@
 // calls tick(); calls are placed through the existing CallMe backend on Railway.
 import { localParts, iso, minuteFloor, inQuietHours, spoken, callOptions, nextStep, clock, QUIET_START, QUIET_END, MAX_SNOOZES } from './policy.js';
 import { submit, decideDraft, receipt, expireDrafts, IntakeError } from './intake.js';
+import { buildReport } from './report.js';
 export { localParts, spoken, nextStep };
 const DAYS = ['0,1,2,3,4', '0,1,2,3,4,5,6', '5,6', 'once'];
 const security = {
@@ -319,6 +320,20 @@ export default {
     try{callId=await placeCall(env,{id:'braindump',message:BRAIN_DUMP_MESSAGE,repeats:2,call_options:BRAIN_DUMP_OPTIONS},{brain_dump:true});result='Brain dump call requested';}catch{}
     await env.DB.prepare('UPDATE runs SET result=?,call_id=? WHERE fire_key=?').bind(result,callId,key).run();
     return callId?response({ok:true}):response({error:result},502);
+   }
+   if(url.pathname==='/api/report') {
+    // Read-only snapshot emailed to Instinct by Noah's helper script. Builds from SELECTs only.
+    if(!env.HELPER_URL||!env.HELPER_KEY)return response({error:'Email is not set up for reports.'},409);
+    const {report,text}=await buildReport(env,Date.now());
+    const subject=`CallMe status report ${report.report_id} (${report.generated_at.slice(0,16).replace('T',' ')})`;
+    let j;
+    try{
+      const r=await fetch(env.HELPER_URL,{method:'POST',headers:{'Content-Type':'application/json'},redirect:'follow',signal:AbortSignal.timeout(25000),
+        body:JSON.stringify({report_key:env.HELPER_KEY,action:'report',report_id:report.report_id,subject,text,json:JSON.stringify(report,null,2)})});
+      j=await r.json();
+    }catch{return response({error:'Could not reach the email script. The report was not sent.',report_id:report.report_id},502);}
+    if(!j||!j.ok||j.sent!==true)return response({error:'Report not sent: '+String((j&&(j.error||j.send_error))||'the email script does not support reports yet (install helper v6)').slice(0,200),report_id:report.report_id},502);
+    return response({ok:true,report_id:report.report_id,generated_at:report.generated_at,exceptions:report.exceptions.length});
    }
    if(url.pathname==='/api/proposals/check') {
     // Ask Noah's Apps Script to look for Instinct's proposal emails right now (it also runs every minute).
