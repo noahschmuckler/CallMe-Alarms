@@ -42,6 +42,8 @@ function callSummary(run, ev) {
     return 'ended, status not reported';
   }
   if (/Uncertain or failed|failed/i.test(run.result)) return 'request failed or uncertain';
+  if (run.fire_key.startsWith('dump|')) return 'call requested; CallMe does not track its result (a recorded brain dump arrives as its own email)';
+  if (run.fire_key.startsWith('test|')) return 'test call requested; CallMe does not track test-call results';
   if (run.result === 'Sending') return 'being sent';
   if (!run.decided) return 'in progress or result not yet seen';
   const m = run.result.split(' · ')[1];
