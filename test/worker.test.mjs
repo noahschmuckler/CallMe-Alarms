@@ -5,6 +5,7 @@ import {makeDB} from './d1.mjs';
 import worker,{tick,followUp,spoken,placeCall} from '../src/worker.js';
 import {callOptions} from '../src/policy.js';
 import {buildReport,isoNY} from '../src/report.js';
+import {mintLink,approvePage} from '../src/approvelink.js';
 import {submit,decideDraft,receipt,parseInstant} from '../src/intake.js';
 
 const MIN=60000;
@@ -38,6 +39,7 @@ test('migration: old production schema upgrades; quiet-hour schedules stay allow
   DB.raw.exec("INSERT INTO runs(fire_key,schedule_id,label,started_at,result,call_id) VALUES('k','b','Day','2026-11-20T12:00:00Z','Call requested','c')");
   DB.raw.exec(readFileSync('migrations/0001_snooze_retry_proposals.sql','utf8'));
   DB.raw.exec(readFileSync('migrations/0002_replace_command.sql','utf8'));
+  DB.raw.exec(readFileSync('migrations/0003_approval_links.sql','utf8'));
   assert.deepEqual(DB.raw.prepare('SELECT id,late_ok,snooze_minutes,until_ack FROM schedules ORDER BY id').all().map(r=>({...r})),[{id:'a',late_ok:1,snooze_minutes:0,until_ack:0},{id:'b',late_ok:0,snooze_minutes:0,until_ack:0}]);
   assert.equal(DB.raw.prepare('SELECT decided FROM runs').get().decided,1);
 });
@@ -449,4 +451,75 @@ test('status report flags unknown outcomes, close armed calls and pause; route s
     const bad=await worker.fetch(new Request('https://x/api/report',{method:'POST',headers:auth,body:'{}'}),env2);
     assert.equal(bad.status,502);
   }finally{globalThis.fetch=orig;}
+});
+
+// ---------- one-tap approval links (Pushover) ----------
+const ORIGIN='https://callme.test';
+const linkEnv=()=>({...setup(),APPROVE_LINK_KEY:'link-key',APPROVE_SIGNING_KEY:'sign-key'});
+const mint=async(env,id,now=NOW,key='link-key')=>{
+  const req=new Request(ORIGIN+'/inbox/approval-link',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({draft_id:id})});
+  const r=await mintLink(req,env,ORIGIN,now);return r.body;
+};
+const visit=(env,u,method='GET',now=NOW,origin=ORIGIN)=>approvePage(new Request(u,{method,headers:method==='POST'?{Origin:origin}:{}}),env,new URL(u),now);
+const pending=env=>all(env,"SELECT * FROM drafts WHERE status='pending'")[0];
+
+test('approval link: GET shows the draft and never approves; POST approves once through the app path',async()=>{
+  const env=linkEnv();await post(env,create());const d=pending(env);
+  const m=await mint(env,d.id);
+  assert.equal(m.ok,true);assert.match(m.url,/^https:\/\/callme\.test\/approve\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  assert.match(m.lines[0],/Trash out/);assert.equal(m.expires_at,new Date(Date.parse(d.received_at)+7*86400000).toISOString());
+  for(const method of ['GET','HEAD','GET']){const r=await visit(env,m.url,method);assert.equal(r.status,200);}   // link previews, refreshes
+  const html=await (await visit(env,m.url)).text();
+  assert.match(html,/Trash out/);assert.match(html,/You planned to take out the trash/);assert.match(html,/press 2 snoozes 30 min/);assert.match(html,/<form method="post"><button>Approve<\/button>/);
+  assert.equal(pending(env).status,'pending');assert.equal(all(env,'SELECT count(*) n FROM schedules')[0].n,0);
+  const ok=await visit(env,m.url,'POST');assert.equal(ok.status,200);assert.match(await ok.text(),/Approved/);
+  assert.equal(all(env,'SELECT status FROM drafts')[0].status,'approved');
+  assert.equal((await receipt(env,'cmd-1')).state,'armed');
+  const again=await visit(env,m.url,'POST');assert.equal(again.status,410);assert.match(await again.text(),/already used/);   // reuse refused
+  assert.equal(all(env,'SELECT count(*) n FROM schedules')[0].n,1);                         // never a second schedule
+  const later=await visit(env,m.url);assert.equal(later.status,410);assert.match(await later.text(),/already used/);
+});
+
+test('approval link gives the same receipt as the Approve button in the app',async()=>{
+  const viaLink=linkEnv(),viaApp=linkEnv();
+  for(const env of [viaLink,viaApp])await post(env,{version:1,title:'Two',commands:[create(),create({command_id:'cmd-b',reminder_id:'rem-b',call_at:'2026-12-08T06:00:00-05:00',label:'Wake'})]});
+  const m=await mint(viaLink,pending(viaLink).id);await visit(viaLink,m.url,'POST');
+  const d=pending(viaApp);
+  const auth={'Authorization':'Basic '+btoa('u:pw'),'X-Alarm-UI':'1','Content-Type':'application/json','Origin':'https://x'};
+  const r=await worker.fetch(new Request('https://x/api/draft/approve',{method:'POST',headers:auth,body:JSON.stringify({id:d.id,hash:d.hash})}),viaApp);
+  assert.equal(r.status,200);
+  const strip=x=>{const o={...x};for(const k of ['draft_id','server_time','received_at','decided_at'])delete o[k];return o;};
+  for(const cid of ['cmd-1','cmd-b'])assert.deepEqual(strip(await receipt(viaLink,cid)),strip(await receipt(viaApp,cid)));
+  const sched=env=>all(env,'SELECT label,at,once_date,enabled,snooze_minutes,until_ack,retry_minutes,revision,reminder_id FROM schedules ORDER BY at');
+  assert.deepEqual(sched(viaLink),sched(viaApp));
+});
+
+test('approval link: expired drafts, wrong keys, tampered or replaced links never approve',async()=>{
+  const env=linkEnv();await post(env,create());const d=pending(env);
+  assert.equal((await mintLink(new Request(ORIGIN+'/x',{method:'POST',body:JSON.stringify({draft_id:d.id})}),env,ORIGIN,NOW)).body.ok,true);   // mintLink itself trusts its caller...
+  const noKey=await worker.fetch(new Request(ORIGIN+'/inbox/approval-link',{method:'POST',headers:{Authorization:'Bearer plan-secret'},body:JSON.stringify({draft_id:d.id})}),env);
+  assert.equal(noKey.status,401);                                       // ...but the route refuses PLAN_TOKEN and wrong keys
+  const first=await mint(env,d.id),second=await mint(env,d.id);
+  assert.equal((await visit(env,first.url,'POST')).status,410);         // older link revoked by the newer one
+  const bad=second.url.slice(0,-3)+(second.url.endsWith('AAA')?'BBB':'AAA');
+  assert.equal((await visit(env,bad,'POST')).status,410);               // signature mismatch
+  assert.equal((await visit(env,second.url,'POST',NOW,'https://evil.test')).status,403);   // cross-site form post
+  const expired=NOW+8*86400000;
+  const late=await visit(env,second.url,'POST',expired);assert.equal(late.status,410);assert.match(await late.text(),/expired/);
+  assert.equal(pending(env).status,'pending');assert.equal(all(env,'SELECT count(*) n FROM schedules')[0].n,0);
+  const m=await mint(env,d.id,expired);assert.equal(m.ok,false);assert.equal(m.url,undefined);assert.match(m.problems.join(' '),/expired/);
+});
+
+test('approval link: failed sanity check returns reasons and no link; odd hours and clashes are flagged, not blocked',async()=>{
+  const env=linkEnv();await post(env,create());const d=pending(env);
+  const past=await mint(env,d.id,Date.parse('2026-12-08T00:29:00Z'));                     // 1 minute before the 7:30 PM call
+  assert.equal(past.ok,false);assert.equal(past.url,undefined);assert.match(past.problems[0],/not in the future/);
+  await approved(env);                                                                       // ... a 7:30 PM call is armed
+  await post(env,{version:1,title:'Late',commands:[create({command_id:'cmd-l',reminder_id:'rem-l',call_at:'2026-12-07T19:40:00-05:00',label:'Close'}),
+    create({command_id:'cmd-q',reminder_id:'rem-q',call_at:'2026-12-07T23:15:00-05:00',label:'Night',policy:{allow_quiet_hours:true}})]});
+  const m=await mint(env,pending(env).id);
+  assert.equal(m.ok,true);assert.ok(m.url);
+  assert.ok(m.flags.some(f=>/"Close".*within 15 minutes of armed call "Trash out"/.test(f)));
+  assert.ok(m.flags.some(f=>/"Night" rings in quiet hours/.test(f)));
+  assert.match((await (await visit(env,m.url)).text()),/rings in quiet hours/);
 });

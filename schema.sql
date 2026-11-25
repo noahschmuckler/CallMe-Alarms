@@ -52,3 +52,8 @@ CREATE TABLE IF NOT EXISTS events (
  fire_key TEXT NOT NULL, call_id TEXT, kind TEXT NOT NULL, call_status TEXT, digits TEXT, outcome TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS event_reminder ON events(reminder_id);
+CREATE TABLE IF NOT EXISTS approval_links (
+ id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, draft_hash TEXT NOT NULL, expires_at TEXT NOT NULL,
+ created_at TEXT NOT NULL, used_at TEXT, revoked INTEGER NOT NULL DEFAULT 0, result TEXT
+);
+CREATE INDEX IF NOT EXISTS approval_link_draft ON approval_links(draft_id);

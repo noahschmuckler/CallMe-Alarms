@@ -3,6 +3,7 @@
 import { localParts, iso, minuteFloor, inQuietHours, spoken, callOptions, nextStep, clock, QUIET_START, QUIET_END, MAX_SNOOZES } from './policy.js';
 import { submit, decideDraft, receipt, expireDrafts, IntakeError } from './intake.js';
 import { buildReport } from './report.js';
+import { mintLink, approvePage } from './approvelink.js';
 export { localParts, spoken, nextStep };
 const DAYS = ['0,1,2,3,4', '0,1,2,3,4,5,6', '5,6', 'once'];
 const security = {
@@ -181,6 +182,12 @@ async function bearerOk(req,secret){
   return diff===0;
 }
 async function inbox(req,env,url){
+  // Approval links are minted only with their own key (Noah's helper script), never with PLAN_TOKEN:
+  // the proposal key can stage drafts but must not be able to obtain a way to approve them.
+  if(url.pathname==='/inbox/approval-link'){
+    if(req.method!=='POST'||!env.APPROVE_SIGNING_KEY||!await bearerOk(req,env.APPROVE_LINK_KEY))return response({error:'unauthorized'},401);
+    const r=await mintLink(req,env,url.origin);return response(r.body,r.status);
+  }
   if(!await bearerOk(req,env.PLAN_TOKEN))return response({error:'unauthorized'},401);
   try{
     if(url.pathname==='/inbox/proposal'&&req.method==='POST'){
@@ -219,6 +226,8 @@ export default {
   const loginUrl=new URL(req.url);
   // Machine endpoints for proposals. Own token; they can only stage drafts and read receipts.
   if(loginUrl.pathname.startsWith('/inbox/'))return inbox(req,env,loginUrl);
+  // One-tap approval page from a Pushover alert; the signed one-time link is the credential.
+  if(loginUrl.pathname.startsWith('/approve/'))return approvePage(req,env,loginUrl);
   if(!env.UI_PASSWORD)return new Response('Owner login is not configured.',{status:503,headers:security});
   if(loginUrl.pathname==='/logout')return new Response(null,{status:303,headers:{...security,Location:'/login','Set-Cookie':'alarm_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0'}});
   if(loginUrl.pathname==='/login'){
